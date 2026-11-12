@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -33,16 +34,29 @@ def read_project_name_version(pyproject_path: Path) -> Tuple[str | None, str | N
     return name, version
 
 
+def read_medusa_base(pyproject_path: Path) -> str | None:
+    """[BKE] The Medusa release this edition is based on: [tool.medusa-bke] medusa-base."""
+    if not pyproject_path.exists():
+        return None
+    try:
+        with pyproject_path.open("rb") as stream:
+            data = tomllib.load(stream)
+    except Exception:
+        return None
+    base = data.get("tool", {}).get("medusa-bke", {}).get("medusa-base")
+    return base if isinstance(base, str) else None
+
+
 def is_full_semver(tag: str | None) -> bool:
     if not tag:
         return False
-    # Accept optional leading 'v' or 'V'
-    return re.fullmatch(r"[vV]?\d+\.\d+\.\d+", tag) is not None
+    # Accept an optional leading 'v' or 'V'; [BKE] release tags are BKEv<version>.
+    return re.fullmatch(r"(BKE)?[vV]?\d+\.\d+\.\d+", tag) is not None
 
 
 def normalize_tag_to_semver(tag: str) -> str:
-    # Strip leading v/V if present
-    return tag.lstrip("vV")
+    # Strip a leading BKE and v/V if present
+    return tag.removeprefix("BKE").lstrip("vV")
 
 
 def sanitize_branch_name(name: str) -> str:
@@ -117,9 +131,9 @@ class PlaceholderStamper:
 def main(argv: list[str]) -> int:
     # Inputs from Taskfile vars (can be overridden by env or args)
     build_dir = os.environ.get("BUILD_DIR", "./dist")
-    # Default artifacts to stamp: medusa-thin.lua plus bundled if present
-    primary = os.environ.get("ARTIFACT_NAME", os.environ.get("ARTIFACT", "medusa-thin.lua"))
-    bundled = os.environ.get("BUNDLED_ARTIFACT_NAME", "medusa.lua")
+    # Default artifacts to stamp: medusa-bke-thin.lua plus bundled if present
+    primary = os.environ.get("ARTIFACT_NAME", os.environ.get("ARTIFACT", "medusa-bke-thin.lua"))
+    bundled = os.environ.get("BUNDLED_ARTIFACT_NAME", "medusa-bke.lua")
 
     candidates = [primary]
     if bundled and bundled != primary:
@@ -127,9 +141,14 @@ def main(argv: list[str]) -> int:
 
     _, base_version = read_project_name_version(Path("pyproject.toml"))
     effective_version = compute_effective_version(base_version)
+    medusa_base = read_medusa_base(Path("pyproject.toml"))
+    if not medusa_base:
+        print("Error: [tool.medusa-bke] medusa-base not found in pyproject.toml", file=sys.stderr)
+        return 2
 
     mapping = {
         "VERSION": effective_version,
+        "MEDUSA_BASE": medusa_base,
     }
 
     stamper = PlaceholderStamper(mapping)

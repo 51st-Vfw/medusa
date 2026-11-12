@@ -103,13 +103,13 @@ def update_diff_links(content: str, new_version: str, repo_url: str | None) -> s
 
     # Build new links
     links = []
-    links.append(f"[Unreleased]: {repo_url}/compare/v{versions[0]}...HEAD")
+    links.append(f"[Unreleased]: {repo_url}/compare/BKEv{versions[0]}...HEAD")
     for i, ver in enumerate(versions):
         if i + 1 < len(versions):
             prev = versions[i + 1]
-            links.append(f"[{ver}]: {repo_url}/compare/v{prev}...v{ver}")
+            links.append(f"[{ver}]: {repo_url}/compare/BKEv{prev}...BKEv{ver}")
         else:
-            links.append(f"[{ver}]: {repo_url}/releases/tag/v{ver}")
+            links.append(f"[{ver}]: {repo_url}/releases/tag/BKEv{ver}")
 
     content += "\n" + "\n".join(links) + "\n"
     return content

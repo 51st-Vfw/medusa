@@ -333,6 +333,88 @@ function TestIadsNetworkHandleShot:test_handleShot_regularBattery_doesNotCallOnS
 	lu.assertEquals(iads._rollingPkBuffer[1], 0)
 end
 
+local function withWeaponMocks(target, guidance, fn)
+	local origTarget, origDesc = GetWeaponTarget, GetWeaponDesc
+	GetWeaponTarget = function()
+		return target
+	end
+	GetWeaponDesc = function()
+		return { guidance = guidance }
+	end
+	local ok, err = pcall(fn)
+	GetWeaponTarget, GetWeaponDesc = origTarget, origDesc
+	if not ok then
+		error(err, 0)
+	end
+end
+
+function TestIadsNetworkHandleShot:test_missile_shot_is_followed_with_the_track_its_weapon_targets()
+	local iads = makeIads()
+	local bat = injectBattery(iads, { 330 })
+	iads:getTrackManager()._byNetworkId[777] = "TRK-777"
+	local weapon = { id_ = 9001 }
+	withWeaponMocks({ id_ = 777 }, 4, function()
+		iads:_handleShot(330, "SA-6", weapon)
+	end)
+	lu.assertNotNil(bat.MissilesInFlight)
+	local flight = bat.MissilesInFlight[1]
+	lu.assertIs(flight.Weapon, weapon)
+	lu.assertEquals(flight.TargetTrackId, "TRK-777")
+	lu.assertEquals(flight.LaunchTime, 1000)
+	lu.assertTrue(flight.Guided)
+end
+
+function TestIadsNetworkHandleShot:test_ir_missile_is_not_crew_guided_and_an_unknown_target_stays_unknown()
+	-- The battery's assignment is not what DCS fired at: guessing it would give a contact the crew never shot at
+	-- unanswered-launch evidence, or start a test-shot hold on it.
+	local iads = makeIads()
+	local bat = injectBattery(iads, { 331 })
+	bat.CurrentTargetTrackId = "ASSIGNED"
+	withWeaponMocks(nil, 2, function()
+		iads:_handleShot(331, "SA-6", {})
+	end)
+	lu.assertNil(bat.MissilesInFlight[1].TargetTrackId)
+	lu.assertFalse(bat.MissilesInFlight[1].Guided)
+	iads:getTrackManager()._byNetworkId[778] = nil
+	withWeaponMocks({ id_ = 778 }, 4, function() -- a weapon target the network holds no track of
+		iads:_handleShot(331, "SA-6", {})
+	end)
+	lu.assertNil(bat.MissilesInFlight[2].TargetTrackId)
+end
+
+function TestIadsNetworkHandleShot:test_stopping_the_network_releases_the_decoy_response()
+	local iads = makeIads()
+	local bat = injectBattery(iads, { 334 })
+	bat.ActivationState = "STATE_HOT"
+	bat.EngageAirWeapons = false
+	bat.TestShotHold = { Since = 990 }
+	local options, roe = {}, {}
+	local origOption, origRoe = SetControllerOption, ControllerSetROE
+	SetControllerOption = function(_, id, value)
+		options[#options + 1] = { id = id, value = value }
+	end
+	ControllerSetROE = function(_, value)
+		roe[#roe + 1] = value
+	end
+	local ok, err = pcall(iads.stop, iads)
+	SetControllerOption, ControllerSetROE = origOption, origRoe
+	lu.assertTrue(ok, tostring(err))
+	lu.assertNil(bat.TestShotHold)
+	lu.assertTrue(bat.EngageAirWeapons)
+	lu.assertEquals(options, { { id = AI.Option.Ground.id.ENGAGE_AIR_WEAPONS, value = true } })
+	lu.assertEquals(roe, { "OPEN_FIRE" })
+end
+
+function TestIadsNetworkHandleShot:test_no_flight_bookkeeping_when_decoy_assessment_is_off()
+	local iads = makeIads()
+	iads._doctrine.DecoyAssessment = false
+	local bat = injectBattery(iads, { 332 })
+	withWeaponMocks({ id_ = 777 }, 4, function()
+		iads:_handleShot(332, "SA-6", {})
+	end)
+	lu.assertNil(bat.MissilesInFlight)
+end
+
 function TestIadsNetworkHandleShot:test_independentAaaShotDoesNotAffectRollingPk()
 	local iads = makeIads()
 	local bat = injectIndependentAaa(iads, 305)
@@ -342,6 +424,33 @@ function TestIadsNetworkHandleShot:test_independentAaaShotDoesNotAffectRollingPk
 	lu.assertEquals(bat.ShotsFired, 1)
 	lu.assertEquals(bat.TotalAmmoStatus, 1)
 	lu.assertEquals(iads._rollingPkCount, 0)
+end
+
+function TestIadsNetworkHandleShot:test_a_missile_launch_makes_a_surprised_network_engaged_but_gunfire_does_not()
+	local R = Medusa.Constants.Readiness
+	local iads = makeIads()
+	injectIndependentAaa(iads, 307)
+	injectBattery(iads, { 308 })
+	iads._crew.readiness = R.SURPRISED
+
+	iads:_handleShot(307, "ZU-23")
+	lu.assertEquals(iads:getReadiness(), R.SURPRISED)
+	lu.assertEquals(Medusa.Services.CrewFactorsService.missilesInFlight(iads._crew, 1000), 0)
+
+	iads:_handleShot(308, "SA-6")
+	lu.assertEquals(iads:getReadiness(), R.ENGAGED)
+	lu.assertEquals(Medusa.Services.CrewFactorsService.missilesInFlight(iads._crew, 1000), 1)
+end
+
+function TestIadsNetworkHandleShot:test_a_missile_loads_the_net_until_its_estimated_time_to_target()
+	local iads = makeIads()
+	local bat = injectBattery(iads, { 309 })
+	bat.EngagementRangeMax = 10300 -- SA-8, no target track: the whole range at SAM_AVG_MISSILE_SPEED_MPS
+	local ttk = 10300 / Medusa.Constants.SAM_AVG_MISSILE_SPEED_MPS
+	iads:_handleShot(309, "SA-6")
+	local CFS = Medusa.Services.CrewFactorsService
+	lu.assertEquals(CFS.missilesInFlight(iads._crew, 1000 + ttk - 0.5), 1)
+	lu.assertEquals(CFS.missilesInFlight(iads._crew, 1000 + ttk + 0.5), 0)
 end
 
 function TestIadsNetworkHandleShot:test_aaaShotDispatchesNeighborPropagation()
@@ -732,4 +841,38 @@ function TestIadsNetworkManpadAssignmentCue:test_every_target_assignment_cues_ma
 	lu.assertEquals(#cues, 2)
 	lu.assertIs(cues[1], tracks["sead-track"].Position)
 	lu.assertIs(cues[2], tracks["greedy-track"].Position)
+end
+
+TestIadsNetworkDecoyPhase = {}
+
+function TestIadsNetworkDecoyPhase:setUp()
+	installMocks()
+end
+
+function TestIadsNetworkDecoyPhase:tearDown()
+	restoreMocks()
+end
+
+function TestIadsNetworkDecoyPhase:test_harm_phase_runs_decoy_pass_then_response_before_point_defence()
+	local iads = makeIads()
+	local order = {}
+	local DAS, DRS = Medusa.Services.DecoyAssessmentService, Medusa.Services.DecoyResponseService
+	local PDS = Medusa.Services.PointDefenseService
+	local origAssess, origUpdate, origEngage = DAS.assess, DRS.update, PDS.engageThreats
+	DAS.assess = function(ctx)
+		order[#order + 1] = "assess"
+		lu.assertNotNil(ctx.geoGrid)
+	end
+	DRS.update = function()
+		order[#order + 1] = "update"
+	end
+	PDS.engageThreats = function()
+		order[#order + 1] = "pd"
+		return 0
+	end
+	iads._assignmentPhase = 1
+	local ok, err = pcall(iads._runPhase, iads)
+	DAS.assess, DRS.update, PDS.engageThreats = origAssess, origUpdate, origEngage
+	lu.assertTrue(ok, tostring(err))
+	lu.assertEquals(order, { "assess", "update", "pd" })
 end

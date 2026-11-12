@@ -231,3 +231,34 @@ end
 function TestGetRotationGroups:test_missing_network_returns_nil()
 	lu.assertNil(API.getRotationGroups("GHOST"))
 end
+
+TestReadinessApi = {}
+
+function TestReadinessApi:setUp()
+	resetIadsById()
+end
+
+function TestReadinessApi:test_set_and_get_readiness()
+	local iads = registerNetwork("alpha", { Readiness = "SURPRISED" })
+	local set = {}
+	iads.setReadiness = function(_self, value, why)
+		set.value, set.why = value, why
+		return true
+	end
+	iads.getReadiness = function(_self)
+		return set.value or "SURPRISED"
+	end
+	lu.assertEquals(API.getReadiness("alpha"), "SURPRISED")
+	lu.assertTrue(API.setReadiness("alpha", "ENGAGED"))
+	lu.assertEquals(set.value, "ENGAGED")
+	lu.assertEquals(set.why, "api")
+	lu.assertEquals(API.getReadiness("alpha"), "ENGAGED")
+	lu.assertFalse(API.setReadiness("alpha", "PANIC"))
+	lu.assertFalse(API.setReadiness("nowhere", "ALERTED"))
+	lu.assertNil(API.getReadiness("nowhere"))
+end
+
+function TestReadinessApi:test_get_readiness_falls_back_to_the_doctrine()
+	registerNetwork("bravo", { Readiness = "ALERTED" })
+	lu.assertEquals(API.getReadiness("bravo"), "ALERTED")
+end

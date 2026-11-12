@@ -12,7 +12,8 @@ require("core.Constants")
 
     What this entity does
     - Defines a doctrine configuration table with defaults for every tactical setting.
-    - Validates enum fields against Constants, clamps numeric fields, fills missing values from defaults.
+    - Validates enum and boolean fields (a wrong value is an error and takes the default), clamps numeric fields,
+      fills missing values from defaults.
 
     How others use it
     - Config:getDoctrine merges mission-maker overrides with this template to produce the active doctrine.
@@ -32,6 +33,8 @@ local DOCTRINE_SCHEMA = {
 		enum = "CoordinatedEngagementTactics",
 	},
 	{ name = "Posture", type = "enum", default = "HOT_WAR", enum = "Posture" },
+	-- Starting readiness (SURPRISED / ALERTED / ENGAGED); rises during the mission. Unset: from Posture.
+	{ name = "Readiness", type = "enum", enum = "Readiness" },
 	{ name = "ShootScoot", type = "enum", default = "NONE", enum = "ShootAndScootPolicy" },
 	{ name = "SAMAsEWR", type = "enum", default = "WHEN_NO_EWR", enum = "SAMAsEWRPolicy" },
 	{
@@ -84,8 +87,49 @@ local DOCTRINE_SCHEMA = {
 	{ name = "RollingPkEnabled", type = "boolean", default = true },
 	{ name = "HARMSaturateOnAmmo", type = "boolean", default = false },
 	{ name = "PoolDefensePoints", type = "boolean", default = false },
+	-- Decoy assessment: judge unpowered decoys from how they fly; off = no decoy labels at all.
+	{ name = "DecoyAssessment", type = "boolean", default = true },
+	-- Long/medium-range batteries turn engage-air-weapons off while only probable decoys and known aircraft are
+	-- in reach; off = Medusa leaves engage-air-weapons as the mission set it.
+	{ name = "ManageEngageAirWeapons", type = "boolean", default = true },
+	-- A HOT long/medium-range battery holds fire after one shot at a lone suspect decoy group until the missile's
+	-- flight ends (reconnaissance by fire); off = no test-shot holds.
+	{ name = "DecoyTestShots", type = "boolean", default = true },
+	-- A HOT long/medium-range battery whose own fire-control radar locks a probable decoy, or that fires at one,
+	-- turns engage-air-weapons off for a while (aircraft are still engaged); needs ManageEngageAirWeapons. Off = no
+	-- fire holds.
+	{ name = "DecoyFireDiscipline", type = "boolean", default = true },
+	-- A dropped track is re-acquired by a new contact that is where it should be and flies as it should, whatever DCS
+	-- object it is, carrying labels as the fit allows; off = only the same DCS object near its old position (stock).
+	{ name = "EvidenceReacquisition", type = "boolean", default = true },
+	-- A launcher-less search radar with a short reach (Dog Ear-style) is a local cueing radar: dark unless a threat is
+	-- near the units it supports, cueing MANPAD and AAA crews when up; a group of such a radar with guns is an AAA
+	-- battery. Off = groups are classified as in stock Medusa: a radar-only group is an early-warning radar that
+	-- follows the EWR EMCON policy (on by default), and a radar with guns goes by unit count.
+	{ name = "LocalCueingRadars", type = "boolean", default = true },
+	-- A dark group whose own crew sees or hears a threat brings its radar up WARM (radar on, weapons hold) on its own;
+	-- not under ROE HOLD, HARM shutdown or crew suppression. Off = only the network wakes it.
+	{ name = "LocalInitiative", type = "boolean", default = true },
+	-- Crews of managed ground groups (and observer-named groups) radio coarse reports of aircraft they see or hear.
+	-- Off = no observer looks and no reports.
+	{ name = "ObserverReports", type = "boolean", default = true },
+	-- A local cueing radar that no other ground radar of the network covers sweeps briefly every few minutes (random
+	-- times) instead of staying blind until a crew reports. Off = it comes up only for a reason (threat near, alerted
+	-- crew, report).
+	{ name = "LocalRadarSweeps", type = "boolean", default = true },
+	-- Crew skill, readiness and net load shape observer reports (made at all, delay, precision, delivery) and how
+	-- often a surprised network's crews look. Off = reports and looks ignore skill, readiness and load.
+	{ name = "CrewFactors", type = "boolean", default = true },
+	-- Listening stations (groups named esm/elint) take bearings on hostile aircraft radars that transmit and
+	-- cross them into fixes when the bearings can be matched up. Off = the stations are ordinary ground crews.
+	{ name = "PassiveDetection", type = "boolean", default = true },
+	-- Training: the sensing, identification and report chain is deterministic and luck never favours the attacker
+	-- (ranges at their midpoint or a fixed per-object point, no return-size noise, report position errors at their
+	-- typical size in a fixed direction, no report unmade or lost). DCS's own randomness stays.
+	{ name = "TrainingMode", type = "boolean", default = false },
 	-- Tables (pass through)
 	{ name = "EMCON", type = "table" },
+	{ name = "ScanUpdateRateSec", type = "table" },
 	{ name = "MaxEngageRangePct", type = "table" },
 	{ name = "FlightSizeOverrides", type = "table" },
 	{ name = "LaunchCriteria", type = "table" },
@@ -114,6 +158,17 @@ local MANPAD_SCHEMA = {
 		min = Medusa.Constants.Manpad.AUDIO_RANGE_MIN_M,
 		max = Medusa.Constants.Manpad.AUDIO_RANGE_MAX_M,
 	},
+}
+
+-- Listening stations (doctrine ESM): antenna mast height, how far a radar's main beam, its sidelobes and an
+-- early-warning radar can be heard, the 1-sigma bearing error and how often the stations listen.
+local ESM_SCHEMA = {
+	{ name = "MastHeightM", default = Medusa.Constants.Esm.DEFAULT_MAST_HEIGHT_M, min = 1, max = 60 },
+	{ name = "MaxRangeKm", default = Medusa.Constants.Esm.DEFAULT_MAX_RANGE_KM, min = 10, max = 600 },
+	{ name = "SidelobeRangeKm", default = Medusa.Constants.Esm.DEFAULT_SIDELOBE_RANGE_KM, min = 1, max = 100 },
+	{ name = "AewMaxRangeKm", default = Medusa.Constants.Esm.DEFAULT_AEW_MAX_RANGE_KM, min = 10, max = 600 },
+	{ name = "BearingSigmaDeg", default = Medusa.Constants.Esm.DEFAULT_BEARING_SIGMA_DEG, min = 0.1, max = 15 },
+	{ name = "LookIntervalSec", default = Medusa.Constants.Esm.DEFAULT_LOOK_INTERVAL_SEC, min = 2, max = 120 },
 }
 
 local AAA_SCHEMA = {
@@ -203,6 +258,86 @@ local CREW_SUPPRESSION_SCHEMA = {
 
 local _logger
 
+--- Per-kind track refresh rates for a doctrine, fixed at load. An explicit ScanUpdateRateSec entry wins, then an
+--- explicitly set PerTrackScanUpdateRate, then the default; each is clamped to the global limits and to half of
+--- TrackMemorySec (1 s floor). Logs an error for each rate it caps and when SensorCleanupSec is below the slowest
+--- rate (the refresh gate would be cleared before the radar looks again).
+--- @param doctrine table Doctrine being built (needs ExplicitFields, PerTrackScanUpdateRate, SensorCleanupSec)
+--- @return table rates { EWR = number, SAM_SEARCH = number, SAM_TRACK = number }
+function Medusa.Entities.Doctrine.resolveScanRates(doctrine)
+	local C = Medusa.Constants
+	local memory = Medusa.Config
+			and Medusa.Config.getTrackMemoryDurationSec
+			and Medusa.Config:getTrackMemoryDurationSec()
+		or 30
+	local cap = math.max(C.SCAN_UPDATE_RATE_MIN_SEC, memory / 2)
+	local overrides = type(doctrine.ScanUpdateRateSec) == "table" and doctrine.ScanUpdateRateSec or {}
+	local base = doctrine.ExplicitFields
+		and doctrine.ExplicitFields.PerTrackScanUpdateRate
+		and doctrine.PerTrackScanUpdateRate
+	local rates, slowest = {}, 0
+	for kind, default in pairs(C.SCAN_UPDATE_RATE_DEFAULTS) do
+		local value = overrides[kind]
+		if type(value) ~= "number" then
+			value = base or default
+		end
+		value = math.max(C.SCAN_UPDATE_RATE_MIN_SEC, math.min(C.SCAN_UPDATE_RATE_MAX_SEC, value))
+		if value > cap then
+			if _logger then
+				_logger:error(
+					string.format(
+						"%s scan rate %ss exceeds half of TrackMemorySec (%ss), using %ss",
+						kind,
+						tostring(value),
+						tostring(memory),
+						tostring(cap)
+					)
+				)
+			end
+			value = cap
+		end
+		rates[kind] = value
+		slowest = math.max(slowest, value)
+	end
+	local cleanup = doctrine.SensorCleanupSec
+	if _logger and type(cleanup) == "number" and cleanup < slowest then
+		_logger:error(
+			string.format(
+				"SensorCleanupSec %ss is below the slowest scan rate (%ss): tracks from that radar refresh every poll",
+				tostring(cleanup),
+				tostring(slowest)
+			)
+		)
+	end
+	return rates
+end
+
+--- Logs an error for each key in a settings table that Medusa does not know (a misspelt key is otherwise ignored).
+--- @param label string Setting name used in the message, e.g. "ESM"
+--- @param overrides any The mission's table; anything that is not a table is skipped
+--- @param isKnown fun(key: any): boolean
+local function reportUnknownKeys(label, overrides, isKnown)
+	if type(overrides) ~= "table" then
+		return
+	end
+	for key in pairs(overrides) do
+		if not isKnown(key) then
+			_logger:error(string.format("unknown setting '%s.%s' ignored", label, tostring(key)))
+		end
+	end
+end
+
+local function schemaHas(schema)
+	return function(key)
+		for i = 1, #schema do
+			if schema[i].name == key then
+				return true
+			end
+		end
+		return false
+	end
+end
+
 local function resolveNumericSubtable(schema, overrides, legacyOverrides)
 	local source = type(overrides) == "table" and overrides or {}
 	local resolved = {}
@@ -235,10 +370,14 @@ function Medusa.Entities.Doctrine.new(overrides)
 	if not _logger then
 		_logger = Medusa.Logger:ns("Doctrine")
 	end
+	local explicit = {}
 
 	for i = 1, #DOCTRINE_SCHEMA do
 		local s = DOCTRINE_SCHEMA[i]
 		local raw = d[s.name]
+		if raw ~= nil then
+			explicit[s.name] = true
+		end
 
 		if s.type == "enum" then
 			local enumTable = Medusa.Constants[s.enum]
@@ -255,7 +394,7 @@ function Medusa.Entities.Doctrine.new(overrides)
 						s.name,
 						tostring(raw),
 						table.concat(valid, ", "),
-						tostring(s.default)
+						s.default and tostring(s.default) or "the default"
 					)
 				)
 				raw = nil
@@ -284,6 +423,17 @@ function Medusa.Entities.Doctrine.new(overrides)
 				end
 			end
 		elseif s.type == "boolean" then
+			if raw ~= nil and type(raw) ~= "boolean" then
+				_logger:error(
+					string.format(
+						"invalid '%s' value '%s' (valid: true, false), using '%s'",
+						s.name,
+						tostring(raw),
+						tostring(s.default)
+					)
+				)
+				raw = nil
+			end
 			if raw ~= nil then
 				doctrine[s.name] = raw
 			else
@@ -296,8 +446,25 @@ function Medusa.Entities.Doctrine.new(overrides)
 		end
 	end
 
+	if doctrine.Readiness == nil then
+		doctrine.Readiness = Medusa.Constants.ReadinessFromPosture[doctrine.Posture]
+			or Medusa.Constants.Readiness.ENGAGED
+	end
+
+	-- Fields the mission set itself (defaults filled in above are indistinguishable otherwise).
+	doctrine.ExplicitFields = explicit
+	doctrine.ScanRates = Medusa.Entities.Doctrine.resolveScanRates(doctrine)
+	reportUnknownKeys("ScanUpdateRateSec", d.ScanUpdateRateSec, function(key)
+		return Medusa.Constants.SCAN_UPDATE_RATE_DEFAULTS[key] ~= nil
+	end)
+	if doctrine.DecoyFireDiscipline and not doctrine.ManageEngageAirWeapons then
+		_logger:error("DecoyFireDiscipline needs ManageEngageAirWeapons; no decoy fire holds will be made")
+	end
+
 	doctrine.MANPAD = resolveNumericSubtable(MANPAD_SCHEMA, d.MANPAD, d)
 	doctrine.AAA = resolveNumericSubtable(AAA_SCHEMA, d.AAA)
+	doctrine.ESM = resolveNumericSubtable(ESM_SCHEMA, d.ESM)
+	reportUnknownKeys("ESM", d.ESM, schemaHas(ESM_SCHEMA))
 	local crewSuppressionOverrides = type(d.CrewSuppression) == "table" and d.CrewSuppression or {}
 	doctrine.CrewSuppression = resolveNumericSubtable(CREW_SUPPRESSION_SCHEMA, crewSuppressionOverrides)
 	if doctrine.CrewSuppression.DurationMinSec > doctrine.CrewSuppression.DurationMaxSec then

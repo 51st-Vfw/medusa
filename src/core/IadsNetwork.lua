@@ -20,6 +20,12 @@ require("services.CrewSuppressionService")
 require("services.CrewPerceptionService")
 require("services.HarmDetectionService")
 require("services.HarmResponseService")
+require("services.DecoyAssessmentService")
+require("services.DecoyResponseService")
+require("services.LocalRadarService")
+require("services.ObserverReportService")
+require("entities.ObserverPost")
+require("services.stores.ObserverPostStore")
 require("services.EntityFactory")
 require("services.AssetIndex")
 require("services.GeospatialIndexService")
@@ -34,6 +40,10 @@ require("services.PointDefenseService")
 require("services.MetricsService")
 require("services.BlackBoxService")
 require("services.MetricsSnapshotService")
+require("core.Chance")
+require("core.Debrief")
+require("services.CrewFactorsService")
+require("services.EsmService")
 
 --[[
             ██╗ █████╗ ██████╗ ███████╗    ███╗   ██╗███████╗████████╗██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗
@@ -90,6 +100,40 @@ local function trackSourceForSensor(sensor)
 	end
 	return Medusa.Constants.TrackSource.EARLY_WARNING_RADAR
 end
+
+--- Track refresh interval for a sensor group's reports; nil means doctrine PerTrackScanUpdateRate.
+function Medusa.Core.IadsNetwork._scanRateForSensor(doctrine, sourceType)
+	if sourceType == Medusa.Constants.TrackSource.EARLY_WARNING_RADAR then
+		return Medusa.Services.SensorPollingService.scanRateFor(doctrine, "EWR")
+	end
+	return nil
+end
+
+--- Track refresh interval for a battery's reports: a HOT multi-target engagement radar keeps every track it holds
+--- fresh; a search radar or a single-target tracker refreshes at the search rate. Ships use the doctrine default.
+function Medusa.Core.IadsNetwork._scanRateForBattery(doctrine, battery, sourceType)
+	if sourceType ~= Medusa.Constants.TrackSource.SAM_BATTERY then
+		return nil
+	end
+	local hot = battery.ActivationState == Medusa.Constants.ActivationState.STATE_HOT
+	if hot and (battery.HarmCapableUnitCount or 0) > 0 then
+		return Medusa.Services.SensorPollingService.scanRateFor(doctrine, "SAM_TRACK")
+	end
+	return Medusa.Services.SensorPollingService.scanRateFor(doctrine, "SAM_SEARCH")
+end
+
+--- Radar kind of a battery for contact evidence (SCAN_UPDATE_RATE_DEFAULTS keys): a HOT multi-target engagement
+--- radar is SAM_TRACK, any other SAM or ship radar SAM_SEARCH.
+function Medusa.Core.IadsNetwork._radarKind(battery)
+	local hot = battery.ActivationState == Medusa.Constants.ActivationState.STATE_HOT
+	if hot and (battery.HarmCapableUnitCount or 0) > 0 then
+		return "SAM_TRACK"
+	end
+	return "SAM_SEARCH"
+end
+
+local TS_EWR = Medusa.Constants.TrackSource.EARLY_WARNING_RADAR
+local TS_SAM = Medusa.Constants.TrackSource.SAM_BATTERY
 
 local function trackSourceForBattery(battery)
 	if isShipGroupCategory(battery.GroupCategory) then
@@ -152,6 +196,9 @@ local _phaseLabels = {
 }
 
 local _LS = Medusa.Constants.TrackLifecycleState
+-- Networks started together tick in the same frames; each later one shifts its periodic phases by one tick so
+-- their heavy phases do not land in the same frame.
+local _runningNetworkCount = 0
 local function _isTrackAlive(track)
 	return track and track.LifecycleState == _LS.ACTIVE
 end
@@ -187,6 +234,28 @@ function Medusa.Core.IadsNetwork:new(opts)
 		_manpadInterval = 10,
 		_manpadCtx = {},
 		_aaaInterval = 10,
+		-- Local cueing radars (LocalRadarService state) and the radar+guns groups waiting for their radar's reach.
+		_localRadars = Medusa.Services.LocalRadarService.newState(),
+		_observers = Medusa.Services.ObserverReportService.newState(),
+		-- Listening stations' bearings and fixes (EsmService state).
+		_esm = Medusa.Services.EsmService.newState(),
+		-- Readiness and net load (CrewFactorsService state; made with the doctrine at initialize).
+		_crew = nil,
+		-- ARMs inbound (tracks assessed HARM) and aircraft tracks (HOSTILE or BANDIT, not ARMs, not probable decoys),
+		-- counted by the HARM phase's priority pass for the net load.
+		_armsInbound = 0,
+		_aircraftTracks = 0,
+		-- When the net load's capacities were last sized from the network's sites (CrewFactorsService.setNetworkSize).
+		_crewSizedAt = nil,
+		-- Launcher DCS type names whose test-shot missile lost guidance under weapons hold (learned at run time): no
+		-- battery of the network makes test shots with such a launcher (DecoyResponseService).
+		_holdBreaksTypes = {},
+		_localPictureInterval = 10,
+		_localCtx = {},
+		_deferredGroups = {},
+		_localRadarsDirty = false,
+		_probeComplete = false,
+		_fastErectDone = false,
 		_unitPosRefreshInterval = Medusa.Constants.LocalAircraftDetection.POSITION_REFRESH_TICK_INTERVAL,
 		-- IadsNetwork fills this table before each AaaService operation.
 		_aaaCtx = {},
@@ -228,6 +297,7 @@ function Medusa.Core.IadsNetwork:new(opts)
 		_phaseFailures = {},
 		_harmSortBuffer = {},
 		_harmPriorityKeys = {},
+		_phaseOffset = 0,
 		_harmNormalBuffer = {},
 		_ctx = {},
 	}
@@ -267,6 +337,7 @@ function Medusa.Core.IadsNetwork:initialize()
 	local zoneStore = Medusa.Services.AirspaceZoneStore:new()
 	local airbaseStore = Medusa.Services.AirbaseStore:new()
 	local interceptorStore = Medusa.Services.InterceptorGroupStore:new()
+	local observerStore = Medusa.Services.ObserverPostStore:new()
 
 	self._spatialIndex = Medusa.Services.GeospatialIndexService:new(10000)
 	self._networkedGeoGrid = self._spatialIndex:networkedGeoGrid()
@@ -284,6 +355,7 @@ function Medusa.Core.IadsNetwork:initialize()
 		zones = zoneStore,
 		airbases = airbaseStore,
 		interceptors = interceptorStore,
+		observers = observerStore,
 		tracks = self._trackManager:getStore(),
 		networkedGeoGrid = self._networkedGeoGrid,
 		localGeoGrid = self._spatialIndex:localGeoGrid(),
@@ -293,11 +365,24 @@ function Medusa.Core.IadsNetwork:initialize()
 
 	self._probingService = Medusa.Services.SensorProbingService:new(self._coalitionId)
 	self._doctrine = Medusa.Config:getDoctrine(self._doctrineKey)
+	self._trackManager:setEvidenceReacquisition(self._doctrine.EvidenceReacquisition ~= false)
+	self._crew = Medusa.Services.CrewFactorsService.newState(self._doctrine)
 	local network = self
+	self._trackManager:getStore().onIdentified = function(track, from, to)
+		network:_onTrackIdentified(track, from, to)
+	end
+	if Medusa.Chance.isTraining(self._doctrine) then
+		self._logger:info("training mode: sensing, identification and reports are deterministic")
+		Medusa.Debrief.emit(self._id, GetTime(), "TRAINING_MODE", "on", "true")
+	end
 	self._aaaCtx.onModeChanged = function(battery, mode)
 		if mode == Medusa.Constants.Aaa.Mode.RADAR_DIRECTED then
 			network:_updateMaxEngagementRange(battery)
 		end
+		network._pdReassignNeeded = true
+	end
+	-- Point-defence assignment skips crew-suppressed batteries; relink when one recovers.
+	self._crewSuppressionCtx.onRecovered = function()
 		network._pdReassignNeeded = true
 	end
 	Medusa.Services.AaaService.setBarrageLimit(self._aaaBarrageState, self._id, self._doctrine.AAA.MaxBarrageGroups)
@@ -375,6 +460,8 @@ function Medusa.Core.IadsNetwork:start()
 	end
 	self:_subscribeSuppressionEvents()
 	self._running = true
+	self._phaseOffset = _runningNetworkCount
+	_runningNetworkCount = _runningNetworkCount + 1
 	Medusa.Services.CrewSuppressionService.resume(self:_updateCrewSuppressionContext(GetTime()))
 	self._logger:info("started")
 	self._discovery:enableDynamicAdds()
@@ -397,6 +484,9 @@ function Medusa.Core.IadsNetwork:_releaseLocalDefenses()
 end
 
 function Medusa.Core.IadsNetwork:stop()
+	if self._running then
+		_runningNetworkCount = math.max(0, _runningNetworkCount - 1)
+	end
 	self._running = false
 	self._logger:info("stopped")
 	if self._initialized then
@@ -404,11 +494,28 @@ function Medusa.Core.IadsNetwork:stop()
 	end
 	self:_unsubscribeSuppressionEvents()
 	self:_releaseLocalDefenses()
+	self:_releaseDecoyResponse()
 	if self._timerId then
 		CancelSchedule(self._timerId)
 		self._timerId = nil
 	end
 	return true
+end
+
+--- On stop: no battery is left holding fire for a test shot or with engage-air-weapons off by the decoy response.
+function Medusa.Core.IadsNetwork:_releaseDecoyResponse()
+	if not self._initialized then
+		return
+	end
+	local BAS = Medusa.Services.BatteryActivationService
+	local batteries = self._assetIndex:batteryRepository():getAll()
+	for i = 1, #batteries do
+		local b = batteries[i]
+		if b.TestShotHold then
+			pcall(BAS.resumeFire, b)
+		end
+		pcall(BAS.releaseDecoyResponse, b)
+	end
 end
 
 function Medusa.Core.IadsNetwork:_updateCrewSuppressionContext(now)
@@ -437,11 +544,12 @@ function Medusa.Core.IadsNetwork:_attachDiscoveryListener()
 		batteries = self._assetIndex:batteries(),
 		c2Nodes = self._assetIndex:c2Nodes(),
 		manpads = self._assetIndex:manpads(),
+		observers = self._assetIndex:observers(),
 	}
+	self._discoveryStores = stores
 	local hierarchy = self._hierarchy
 	local networkId = self._id
 	local logger = self._logger
-	local spatialIndex = self._spatialIndex
 	local batteryRepository = self._assetIndex:batteryRepository()
 	local harmSystems = self._harmCapableSystems
 	local doctrine = self._doctrine
@@ -459,7 +567,7 @@ function Medusa.Core.IadsNetwork:_attachDiscoveryListener()
 			local path = (dto.parsed and dto.parsed.echelonPath) and table.concat(dto.parsed.echelonPath, ".") or ""
 			logger:info(string.format("added: '%s' roles=[%s] path='%s'", tostring(dto.groupName), roles, path))
 
-			local classification = Medusa.Services.EntityFactory.createFromDTO(
+			local classification, radarTypes = Medusa.Services.EntityFactory.createFromDTO(
 				dto,
 				stores,
 				networkId,
@@ -467,53 +575,418 @@ function Medusa.Core.IadsNetwork:_attachDiscoveryListener()
 				doctrine,
 				crewSkillIndex
 			)
-			if classification == "battery" then
-				local battery = stores.batteries:getByGroupId(dto.groupId)
-				if battery then
-					spatialIndex:syncBattery(battery)
-					spatialIndex:syncSuppressibleUnits(battery)
-					iads:_updateMaxEngagementRange(battery)
-					if iads._erectComplete then
-						local BatteryActivationService = Medusa.Services.BatteryActivationService
-						BatteryActivationService.erectGroup(battery.GroupName)
-						local STD = Medusa.Constants.SystemTypeDefaults
-						local defaults = STD[battery.Role]
-						local defaultState = defaults and defaults.DefaultActivationState or "STATE_COLD"
-						local now = GetTime()
-						if defaultState == Medusa.Constants.ActivationState.STATE_WARM then
-							BatteryActivationService.goWarm(battery, now)
-						else
-							BatteryActivationService.goCold(battery, now)
-						end
-						logger:info(
-							string.format("initialized dynamic battery %s as %s", battery.GroupName, defaultState)
-						)
-						iads:_applyDynamicBatteryRanges(battery)
-						Medusa.Services.CrewSuppressionService.applyInitialDamage(
-							iads:_updateCrewSuppressionContext(now),
-							battery
-						)
-					end
-				end
-			elseif classification == "manpad" then
-				local battery = stores.manpads:getByGroupId(dto.groupId)
-				if battery then
-					spatialIndex:syncBattery(battery)
-					spatialIndex:syncSuppressibleUnits(battery)
-					local now = GetTime()
-					Medusa.Services.BatteryActivationService.goCold(battery, now, iads._trackManager:getStore())
-					if battery.TotalAmmoStatus <= 0 then
-						battery.RearmCheckTime = now + Medusa.Constants.REARM_CHECK_INTERVAL_SEC
-					end
-					Medusa.Services.CrewSuppressionService.applyInitialDamage(
-						iads:_updateCrewSuppressionContext(now),
-						battery
-					)
-				end
+			if classification == "deferred" then
+				iads:_deferGroup(dto, radarTypes)
+			else
+				iads:_adoptClassifiedGroup(dto, classification)
 			end
 		end,
 	})
 end
+
+--- Search radar types (with a unit position) of a MANPAD group or a ground sensor group added after start.
+local function radarTypesOf(units, isRadar, out)
+	for i = 1, #units do
+		local u = units[i]
+		if u.UnitTypeName and u.Position and not out[u.UnitTypeName] and isRadar(u) then
+			out[u.UnitTypeName] = u.Position
+		end
+	end
+	return out
+end
+
+local function isSearchRadarUnit(unit)
+	return Medusa.Entities.Battery.unitHasRole(unit, Medusa.Constants.BatteryUnitRole.SEARCH_RADAR)
+end
+
+local function isGroundSensor(sensor)
+	return not sensor.IsAirborne
+end
+
+--- Puts a newly classified group into service: indexes it and, once the network is up, erects it and applies its
+--- default state (a battery), or puts its crew to rest (a MANPAD group). A radar+guns group classified after the
+--- first erect pass (it waited for its radar's reach) is erected here too.
+function Medusa.Core.IadsNetwork:_adoptClassifiedGroup(dto, classification)
+	local stores = self._discoveryStores
+	local spatialIndex = self._spatialIndex
+	if classification == "battery" then
+		local battery = stores.batteries:getByGroupId(dto.groupId)
+		if not battery then
+			return
+		end
+		spatialIndex:syncBattery(battery)
+		spatialIndex:syncSuppressibleUnits(battery)
+		self:_updateMaxEngagementRange(battery)
+		local BatteryActivationService = Medusa.Services.BatteryActivationService
+		if self._erectComplete then
+			BatteryActivationService.erectGroup(battery.GroupName)
+			local STD = Medusa.Constants.SystemTypeDefaults
+			local defaults = STD[battery.Role]
+			local defaultState = defaults and defaults.DefaultActivationState or "STATE_COLD"
+			local now = GetTime()
+			if defaultState == Medusa.Constants.ActivationState.STATE_WARM then
+				BatteryActivationService.goWarm(battery, now)
+			else
+				BatteryActivationService.goCold(battery, now)
+			end
+			self._logger:info(string.format("initialized dynamic battery %s as %s", battery.GroupName, defaultState))
+			self:_applyDynamicBatteryRanges(battery)
+			Medusa.Services.CrewSuppressionService.applyInitialDamage(self:_updateCrewSuppressionContext(now), battery)
+			-- Point-defense links are made once at erect; a battery added later must
+			-- get them too, as a SHORAD provider or as a SAM that needs one.
+			self._pdReassignNeeded = true
+		elseif self._fastErectDone then
+			-- Classified after the first erect pass but before doctrine states: erect now, the doctrine pass sets it.
+			BatteryActivationService.erectGroup(battery.GroupName)
+			Medusa.Services.CrewSuppressionService.applyInitialDamage(
+				self:_updateCrewSuppressionContext(GetTime()),
+				battery
+			)
+		end
+		if self._probeComplete then
+			self:_classifyLocalRadars()
+		end
+	elseif classification == "manpad" then
+		local battery = stores.manpads:getByGroupId(dto.groupId)
+		if not battery then
+			return
+		end
+		spatialIndex:syncBattery(battery)
+		spatialIndex:syncSuppressibleUnits(battery)
+		local now = GetTime()
+		Medusa.Services.BatteryActivationService.goCold(battery, now, self._trackManager:getStore())
+		if battery.TotalAmmoStatus <= 0 then
+			battery.RearmCheckTime = now + Medusa.Constants.REARM_CHECK_INTERVAL_SEC
+		end
+		Medusa.Services.CrewSuppressionService.applyInitialDamage(self:_updateCrewSuppressionContext(now), battery)
+		if
+			self._probeComplete
+			and not self:_probeUncachedTypes(radarTypesOf(battery.Units or {}, isSearchRadarUnit, {}))
+		then
+			self:_applyManpadRadarRanges()
+			self:_classifyLocalRadars()
+		end
+	elseif classification == "sensor" or classification == "sensors" then
+		local sensors = stores.sensors:getByGroupName(dto.groupName) or {}
+		if self._probeComplete and not self:_probeUncachedTypes(radarTypesOf(sensors, isGroundSensor, {})) then
+			self._probingService:applySensorRanges(stores.sensors)
+			self:_classifyLocalRadars()
+		end
+	end
+end
+
+--- A radar+guns group whose radar reach is not known yet (doctrine LocalCueingRadars): it is classified once its
+--- radar is probed. After the first probe pass it is resolved at once from the probe cache, probing new types when
+--- AllowDynamicProbing is set; an unknown reach leaves it a sensor group.
+function Medusa.Core.IadsNetwork:_deferGroup(dto, radarTypes)
+	radarTypes = radarTypes or {}
+	self._deferredGroups[#self._deferredGroups + 1] = { dto = dto, radarTypes = radarTypes }
+	self._logger:info(string.format("deferred: '%s' (radar with guns) waits for its radar's reach", dto.groupName))
+	if not self._probeComplete or self:_probeUncachedTypes(radarTypes) then
+		return
+	end
+	self:_resolveDeferredGroups()
+end
+
+--- After the first probe pass: probes the radar types of `typePositions` the cache lacks when AllowDynamicProbing is
+--- set (its completion applies the ranges and classifies local radars). Returns true when a probe was started.
+function Medusa.Core.IadsNetwork:_probeUncachedTypes(typePositions)
+	local uncached = nil
+	for typeName, position in pairs(typePositions) do
+		if self._probingService:getCapabilities(typeName) == nil then
+			uncached = uncached or {}
+			uncached[typeName] = position
+		end
+	end
+	if not uncached or not Medusa.Config:get().AllowDynamicProbing then
+		return false
+	end
+	local iads = self
+	self._probingService:probeAll(uncached, function()
+		iads:_onProbingComplete()
+	end)
+	return true
+end
+
+--- Classifies the waiting radar+guns groups with their probed reach (false when unknown: a sensor group).
+function Medusa.Core.IadsNetwork:_resolveDeferredGroups()
+	local deferred = self._deferredGroups
+	if #deferred == 0 then
+		return
+	end
+	self._deferredGroups = {}
+	local ratio = Medusa.Constants.ContactEvidence.REACH_RATIO
+	local probing = self._probingService
+	for i = 1, #deferred do
+		local item = deferred[i]
+		local range = nil
+		for typeName in pairs(item.radarTypes) do
+			local caps = probing:getCapabilities(typeName)
+			if caps and caps.detectionRangeMax and (not range or caps.detectionRangeMax > range) then
+				range = caps.detectionRangeMax
+			end
+		end
+		item.dto.localRadarReachM = range and range / ratio or false
+		local classification = Medusa.Services.EntityFactory.createFromDTO(
+			item.dto,
+			self._discoveryStores,
+			self._id,
+			self._harmCapableSystems,
+			self._doctrine,
+			self._crewSkillIndex
+		)
+		probing:applySensorRanges(self._assetIndex:sensors())
+		probing:applyBatteryRanges(self._assetIndex:batteries())
+		self:_adoptClassifiedGroup(item.dto, classification)
+	end
+end
+
+--- Search radars of MANPAD groups and of radar+guns groups waiting for their reach: their reach decides whether
+--- they are local cueing radars.
+function Medusa.Core.IadsNetwork:_collectLocalRadarProbeTargets(typePositions)
+	local manpads = self._assetIndex:manpads():getAll()
+	local BUR = Medusa.Constants.BatteryUnitRole
+	for i = 1, #manpads do
+		local b = manpads[i]
+		local units = b.Units or {}
+		for j = 1, #units do
+			local unit = units[j]
+			if
+				unit.UnitTypeName
+				and b.Position
+				and not typePositions[unit.UnitTypeName]
+				and Medusa.Entities.Battery.unitHasRole(unit, BUR.SEARCH_RADAR)
+			then
+				typePositions[unit.UnitTypeName] = b.Position
+			end
+		end
+	end
+	local deferred = self._deferredGroups
+	for i = 1, #deferred do
+		for typeName, position in pairs(deferred[i].radarTypes) do
+			if not typePositions[typeName] then
+				typePositions[typeName] = position
+			end
+		end
+	end
+end
+
+--- MANPAD groups with their own search radar (a Dog Ear beside Igla teams) get its probed range, so the radar can
+--- be managed as a local cueing radar. Their engagement range stays the missiles'.
+function Medusa.Core.IadsNetwork:_applyManpadRadarRanges()
+	local manpads = self._assetIndex:manpads():getAll()
+	local BUR = Medusa.Constants.BatteryUnitRole
+	for i = 1, #manpads do
+		local b = manpads[i]
+		local units = b.Units or {}
+		local range = nil
+		for j = 1, #units do
+			local unit = units[j]
+			if unit.UnitTypeName and Medusa.Entities.Battery.unitHasRole(unit, BUR.SEARCH_RADAR) then
+				local caps = self._probingService:getCapabilities(unit.UnitTypeName)
+				if caps and caps.detectionRangeMax and (not range or caps.detectionRangeMax > range) then
+					range = caps.detectionRangeMax
+				end
+			end
+		end
+		if range then
+			b.DetectionRangeMax = range
+		end
+	end
+end
+
+--- The reused context of the local picture (local radars and observer reports).
+function Medusa.Core.IadsNetwork:_localPictureCtx()
+	local ctx = self._localCtx
+	ctx.localRadars = self._localRadars
+	ctx.observers = self._observers
+	ctx.esm = self._esm
+	-- Readiness and net load for the crews' reports (nil with crew factors off: reports ignore them).
+	ctx.crew = Medusa.Services.CrewFactorsService.isOn(self._doctrine) and self._crew or nil
+	ctx.crewSkillIndex = self._crewSkillIndex
+	ctx.maxEngagementRange = self._maxEngagementRange
+	ctx.sensorStore = self._assetIndex:sensors()
+	ctx.batteryStore = self._assetIndex:batteries()
+	ctx.manpadStore = self._assetIndex:manpads()
+	ctx.observerStore = self._assetIndex:observers()
+	ctx.trackStore = self._trackManager:getStore()
+	ctx.networkedGeoGrid = self._assetIndex:networkedGeoGrid()
+	ctx.localGeoGrid = self._assetIndex:localGeoGrid()
+	ctx.doctrine = self._doctrine
+	ctx.coalitionId = self._coalitionId
+	ctx.networkId = self._id
+	ctx.now = GetTime()
+	return ctx
+end
+
+function Medusa.Core.IadsNetwork:_classifyLocalRadars()
+	return Medusa.Services.LocalRadarService.classify(self:_localPictureCtx())
+end
+
+--- Once a second: local radars come up or go dark (LocalRadarService.update), then observer radio reports arrive
+--- (ObserverReportService.update). The observers' looks run one per tick (_runObserverLook).
+function Medusa.Core.IadsNetwork:_runLocalPicturePhase()
+	local ctx = self:_localPictureCtx()
+	local MS = Medusa.Services.MetricsService
+	local hpt = Medusa.hpTimer
+	local t1 = hpt()
+	if self._localRadarsDirty then
+		-- A group died or lost a unit: forget dead radars and dead supported crews.
+		self._localRadarsDirty = false
+		local okClassify, errClassify = pcall(Medusa.Services.LocalRadarService.classify, ctx)
+		if not okClassify then
+			self._logger:error(string.format("local picture phase failed (classify): %s", tostring(errClassify)))
+		end
+	end
+	if ctx.crew then
+		local okCrew, errCrew = pcall(self._updateCrewFactors, self, ctx.now)
+		if not okCrew then
+			self._logger:error(string.format("local picture phase failed (crew factors): %s", tostring(errCrew)))
+		end
+	end
+	local ok, err = pcall(Medusa.Services.LocalRadarService.update, ctx)
+	if not ok then
+		self._logger:error(string.format("local picture phase failed (local radars): %s", tostring(err)))
+	end
+	ok, err = pcall(Medusa.Services.ObserverReportService.update, ctx)
+	if not ok then
+		self._logger:error(string.format("local picture phase failed (observer reports): %s", tostring(err)))
+	end
+	MS.observe("medusa_local_picture_duration_seconds", hpt() - t1)
+end
+
+local crewCounts = { hostile = 0, tracks = 0, pending = 0, arms = 0 }
+
+--- Sizes the net load's capacities from the network's sites (SAM, AAA and MANPAD groups and sensor groups) and SAM
+--- batteries.
+local sizeSensors, sizeGroups = {}, {}
+
+--- Sites (living battery and MANPAD groups and ground radar groups; not AWACS or ships' radars) and SAM batteries,
+--- for the counts that fill the crew net.
+function Medusa.Core.IadsNetwork:_sizeCrewNet()
+	local BR = Medusa.Constants.BatteryRole
+	local DESTROYED = Medusa.Constants.BatteryOperationalStatus.DESTROYED
+	local sites, sams = 0, 0
+	local batteries = self._assetIndex:batteries():getAll()
+	for i = 1, #batteries do
+		local b = batteries[i]
+		if b.OperationalStatus ~= DESTROYED then
+			sites = sites + 1
+			if b.Role ~= BR.AAA and b.Role ~= BR.MANPAD then
+				sams = sams + 1
+			end
+		end
+	end
+	local manpads = self._assetIndex:manpads():getAll()
+	for i = 1, #manpads do
+		if manpads[i].OperationalStatus ~= DESTROYED then
+			sites = sites + 1
+		end
+	end
+	local ship = Group and Group.Category and Group.Category.SHIP
+	local sensors = self._assetIndex:sensors():getAll(sizeSensors)
+	for i = 1, #sensors do
+		local s = sensors[i]
+		if not s.IsAirborne and s.GroupCategory ~= ship and s.GroupName and not sizeGroups[s.GroupName] then
+			sizeGroups[s.GroupName] = true
+			sites = sites + 1
+		end
+	end
+	for name in pairs(sizeGroups) do
+		sizeGroups[name] = nil
+	end
+	Medusa.Services.CrewFactorsService.setNetworkSize(self._crew, sites, sams)
+end
+
+--- Once a second (crew factors on): readiness (word spreads) and net load from the counts the network keeps.
+function Medusa.Core.IadsNetwork:_updateCrewFactors(now)
+	local TI = Medusa.Constants.TrackIdentification
+	local store = self._trackManager:getStore()
+	if not self._crewSizedAt or now - self._crewSizedAt >= Medusa.Constants.Observer.ROSTER_REFRESH_SEC then
+		self._crewSizedAt = now
+		self:_sizeCrewNet()
+	end
+	crewCounts.hostile = store:countByIdentification(TI.HOSTILE)
+	-- Aircraft only: ARMs load the net through their own term, probable decoys not at all.
+	crewCounts.tracks = self._aircraftTracks or 0
+	crewCounts.pending = Medusa.Services.ObserverReportService.pendingCount(self._observers)
+	crewCounts.arms = self._armsInbound or 0
+	Medusa.Services.CrewFactorsService.update(
+		self._crew,
+		now,
+		self._id,
+		crewCounts,
+		Medusa.Chance.isTraining(self._doctrine)
+	)
+end
+
+--- The network's readiness now (the doctrine's starting value with crew factors off).
+function Medusa.Core.IadsNetwork:getReadiness()
+	if self._crew then
+		return self._crew.readiness
+	end
+	return self._doctrine and self._doctrine.Readiness or Medusa.Constants.Readiness.ENGAGED
+end
+
+--- Sets the network's readiness (the mission's call: Medusa.API.setReadiness).
+function Medusa.Core.IadsNetwork:setReadiness(value, why)
+	if self._doctrine then
+		self._doctrine.Readiness = value
+	end
+	if self._crew then
+		return Medusa.Services.CrewFactorsService.set(self._crew, value, GetTime(), self._id, why or "api")
+	end
+	return true
+end
+
+--- Every tick: at most one observer look (ObserverReportService.look), so a second's looks are spread over ticks.
+function Medusa.Core.IadsNetwork:_runObserverLook()
+	local doctrine = self._doctrine
+	local observers = self._observers
+	if not doctrine or doctrine.ObserverReports == false or (observers.rosterTime and observers.rosterCount == 0) then
+		return
+	end
+	local ok, err = pcall(Medusa.Services.ObserverReportService.look, self:_localPictureCtx())
+	if not ok then
+		self._logger:error(string.format("observer look failed: %s", tostring(err)))
+	end
+end
+
+--- Every tick: at most one step of the listening stations' look (EsmService.tick).
+function Medusa.Core.IadsNetwork:_runEsmLook()
+	local doctrine = self._doctrine
+	local esm = self._esm
+	if not doctrine or doctrine.PassiveDetection == false then
+		Medusa.Services.EsmService.stop(esm)
+		return
+	end
+	-- no stations and nothing waiting: only the periodic roster refresh, without building the context every tick
+	if
+		esm.rosterTime
+		and esm.stationCount == 0
+		and esm.pendingCount == 0
+		and esm.phase == 0
+		and GetTime() - esm.rosterTime < Medusa.Constants.Esm.ROSTER_REFRESH_SEC
+	then
+		return
+	end
+	local ok, err = pcall(Medusa.Services.EsmService.tick, self:_localPictureCtx())
+	if not ok then
+		self._logger:error(string.format("listening station look failed: %s", tostring(err)))
+	end
+end
+
+-- Event initiators and targets may be weapons, statics or scenery; the harness unit getters log an error for
+-- anything but a unit, so ask DCS for the object category first. An object whose category cannot be read is
+-- treated as a unit.
+local function isUnitObject(obj)
+	local ok, category = pcall(Object.getCategory, obj)
+	if not ok or category == nil then
+		return true
+	end
+	return category == Object.Category.UNIT
+end
+Medusa.Core.IadsNetwork._isUnitObject = isUnitObject
 
 function Medusa.Core.IadsNetwork:_subscribeWorldEvents()
 	local bus = HarnessWorldEventBus
@@ -530,9 +1003,11 @@ function Medusa.Core.IadsNetwork:_subscribeWorldEvents()
 		if not ok or coal ~= cId then
 			return false
 		end
-		local uid = GetUnitID(event.initiator)
-		if uid then
-			event._unitId = uid
+		if isUnitObject(event.initiator) then
+			local uid = GetUnitID(event.initiator)
+			if uid then
+				event._unitId = uid
+			end
 		end
 		return true
 	end
@@ -550,9 +1025,17 @@ function Medusa.Core.IadsNetwork:_subscribeWorldEvents()
 	bus:sub(world.event.S_EVENT_DEAD, self._deathQueue, deathPredicate)
 	bus:sub(world.event.S_EVENT_CRASH, self._deathQueue, deathPredicate)
 
+	local network = self
 	local function shotPredicate(event)
 		if not validateEventInitiator(event, coalitionId) then
 			return false
+		end
+		-- The launch time now, not when the queue (a few events per tick) gets to it: no engage-air-weapons write may
+		-- come right after a launch (DecoyResponseService).
+		local repo = event._unitId and network._assetIndex and network._assetIndex:batteryRepository()
+		local battery = repo and repo:getByUnitId(event._unitId)
+		if battery then
+			battery.LastLaunchAt = GetTime()
 		end
 		if event.weapon then
 			local wtOk, wtn = pcall(event.weapon.getTypeName, event.weapon)
@@ -594,6 +1077,11 @@ function Medusa.Core.IadsNetwork:_subscribeSuppressionEvents()
 			if type(event) ~= "table" or not event.initiator or not event.target then
 				network:_recordCrewSuppressionDrop(dropReason.INVALID_EVENT)
 				network._logger:debug("crew suppression HIT rejected: missing initiator or target")
+				return false
+			end
+			if not isUnitObject(event.target) then
+				network:_recordCrewSuppressionDrop(dropReason.INVALID_EVENT)
+				network._logger:debug("crew suppression HIT rejected: target is not a unit")
 				return false
 			end
 			local targetCoalition = GetUnitCoalition(event.target)
@@ -871,13 +1359,84 @@ function Medusa.Core.IadsNetwork:_processDeathEvents(limit)
 	return processed
 end
 
+local LOSS_RADAR_ROLES = {
+	[Medusa.Constants.BatteryUnitRole.SEARCH_RADAR] = true,
+	[Medusa.Constants.BatteryUnitRole.TRACK_RADAR] = true,
+	[Medusa.Constants.BatteryUnitRole.TELAR] = true,
+	[Medusa.Constants.BatteryUnitRole.TLAR] = true,
+}
+
+-- Alert-zone losses: a site counts once, when its first radar dies or, for groups without radars (AAA, MANPADs,
+-- IR SAMs), when its last unit dies. Called before the dead unit is removed from the battery.
+local function reportLoss(coalitionId, pos)
+	local alerts = Medusa.Services.AlertZoneService
+	if alerts and pos then
+		alerts.reportLoss(coalitionId, pos)
+	end
+end
+
+-- A group is one site whatever its units are filed as (sensors, a battery): it counts once.
+local function groupLossReported(net, groupName)
+	return groupName ~= nil and net._lossReportedGroups ~= nil and net._lossReportedGroups[groupName] == true
+end
+
+local function markGroupLoss(net, groupName)
+	if groupName ~= nil then
+		net._lossReportedGroups = net._lossReportedGroups or {}
+		net._lossReportedGroups[groupName] = true
+	end
+end
+
+--- A site of the network is lost (counted once per group): debrief line, and with crew factors on the network
+--- turns ENGAGED and the loss loads the net for a while.
+local function noteSiteLost(net, groupName, what)
+	local now = GetTime()
+	Medusa.Debrief.emit(net._id, now, "SITE_LOST", "site", groupName, "kind", what)
+	if net._crew and Medusa.Services.CrewFactorsService.isOn(net._doctrine) then
+		Medusa.Services.CrewFactorsService.onLoss(net._crew, now, net._id, Medusa.Chance.isTraining(net._doctrine))
+	end
+end
+
+--- A ground sensor (an early-warning radar) died: its site counts once, when its first radar dies.
+function Medusa.Core.IadsNetwork:_reportSensorLoss(sensor)
+	if groupLossReported(self, sensor.GroupName) then
+		return
+	end
+	markGroupLoss(self, sensor.GroupName)
+	reportLoss(self._coalitionId, sensor.Position)
+	noteSiteLost(self, sensor.GroupName, "sensor")
+end
+
+function Medusa.Core.IadsNetwork:_reportSiteLoss(battery, destroyedUnit, destroyed)
+	if battery.LossReported or not destroyedUnit or groupLossReported(self, battery.GroupName) then
+		return
+	end
+	local isRadar = false
+	for _, role in ipairs(destroyedUnit.Roles or {}) do
+		if LOSS_RADAR_ROLES[role] then
+			isRadar = true
+		end
+	end
+	local last = #(battery.Units or {}) <= 1
+	if isRadar or last or destroyed then
+		battery.LossReported = true
+		markGroupLoss(self, battery.GroupName)
+		reportLoss(self._coalitionId, destroyedUnit.Position or battery.Position)
+		noteSiteLost(self, battery.GroupName, battery.Role)
+	end
+end
+
 function Medusa.Core.IadsNetwork:_handleUnitDeath(unitId)
 	self._logger:debug(string.format("resolving death event: unitId=%s", tostring(unitId)))
 	local sensorStore = self._assetIndex:sensors()
 	local sensor = sensorStore:getByUnitId(unitId)
 	if sensor then
+		self._localRadarsDirty = true
 		sensorStore:remove(sensor.SensorUnitId)
 		self._logger:info(string.format("sensor destroyed: %s (unitId=%d)", sensor.UnitName, unitId))
+		if not sensor.IsAirborne then
+			self:_reportSensorLoss(sensor)
+		end
 		return
 	end
 
@@ -897,6 +1456,8 @@ function Medusa.Core.IadsNetwork:_handleUnitDeath(unitId)
 		)
 	)
 
+	self._localRadarsDirty = true
+	self:_reportSiteLoss(battery, destroyedUnit)
 	local wasRadarDirectedAaa = Medusa.Entities.Battery.isRadarDirectedAaa(battery)
 	self._spatialIndex:removeSuppressibleUnit(unitId)
 	batteryRepository:removeUnit(unitId)
@@ -910,6 +1471,7 @@ function Medusa.Core.IadsNetwork:_handleUnitDeath(unitId)
 	if battery.Role == Medusa.Constants.BatteryRole.MANPAD then
 		local newStatus = Medusa.Entities.Battery.recomputeState(battery)
 		if newStatus == Medusa.Constants.BatteryOperationalStatus.DESTROYED then
+			self:_reportSiteLoss(battery, destroyedUnit, true)
 			Medusa.Services.ManpadService.cancelPendingWake(battery)
 			Medusa.Services.CrewSuppressionService.cancelRecovery(battery)
 			batteryRepository:remove(battery.BatteryId)
@@ -939,6 +1501,7 @@ function Medusa.Core.IadsNetwork:_handleUnitDeath(unitId)
 	local newStatus = Medusa.Entities.Battery.recomputeState(battery)
 
 	if newStatus == Medusa.Constants.BatteryOperationalStatus.DESTROYED then
+		self:_reportSiteLoss(battery, destroyedUnit, true)
 		Medusa.Services.CrewSuppressionService.cancelRecovery(battery)
 		if battery.Role == Medusa.Constants.BatteryRole.AAA then
 			Medusa.Services.AaaService.cleanupBattery({
@@ -1000,7 +1563,7 @@ function Medusa.Core.IadsNetwork:_processShotEvents(limit)
 	while processed < limit and not self._shotQueue:isEmpty() do
 		local event = self._shotQueue:dequeue()
 		if event and event._unitId then
-			self:_handleShot(event._unitId, event._weaponTypeName)
+			self:_handleShot(event._unitId, event._weaponTypeName, event.weapon)
 		end
 		processed = processed + 1
 	end
@@ -1057,7 +1620,80 @@ local function hasMatchingAmmo(unit, weaponTypeName)
 	return false
 end
 
-function Medusa.Core.IadsNetwork:_handleShot(unitId, weaponTypeName)
+--- The DCS boundary of a battery's own launch for the decoy response: whether the crew follows the missile (radar
+--- or command guidance, from the weapon's descriptor) and which contact it was fired at (the weapon's target, which
+--- the crew's fire-control radar holds; mapped to the network track of that object, else unknown: the battery's
+--- assignment is not what DCS fired at). Then DecoyResponseService.
+function Medusa.Core.IadsNetwork:_recordDecoyLaunch(battery, weapon, now, unit)
+	if not weapon or (self._doctrine and self._doctrine.DecoyAssessment == false) then
+		return
+	end
+	local desc = GetWeaponDesc(weapon)
+	local target = GetWeaponTarget(weapon)
+	local targetTrackId = target and target.id_ and self._trackManager:getTrackIdByNetworkId(target.id_)
+	local ctx = self._decoyLaunchCtx
+	if not ctx then
+		ctx = {}
+		self._decoyLaunchCtx = ctx
+	end
+	ctx.trackStore = self._trackManager:getStore()
+	ctx.geoGrid = self._assetIndex:networkedGeoGrid()
+	ctx.doctrine = self._doctrine
+	ctx.now = now
+	ctx.networkId = self._id
+	ctx.holdBreaksTypes = self._holdBreaksTypes
+	Medusa.Services.DecoyResponseService.recordLaunch(ctx, battery, {
+		Weapon = weapon,
+		LaunchTime = now,
+		TargetTrackId = targetTrackId or nil,
+		Guided = desc ~= nil and Medusa.Constants.Decoy.CREW_GUIDED[desc.guidance] == true,
+		LauncherType = unit and unit.UnitTypeName or nil,
+	})
+end
+
+local LOCK_ROLES = {
+	[Medusa.Constants.BatteryUnitRole.TRACK_RADAR] = true,
+	[Medusa.Constants.BatteryUnitRole.TELAR] = true,
+	[Medusa.Constants.BatteryUnitRole.TLAR] = true,
+}
+
+--- The DCS boundary of what a battery's own fire-control radars are locked on (Unit.getRadar's tracked object on its
+--- tracking radars, TELARs and TLARs), each mapped to the network track of that object (active tracks only). Fills
+--- `out` with track ids (no allocation) and returns their count. DecoyResponseService reads it at most every
+--- FIRE_HOLD_LOCK_READ_SEC per battery, only with a decoy in reach it may still hold against.
+function Medusa.Core.IadsNetwork:_lockedTracksOf(battery, out)
+	local n = 0
+	local units = battery.Units
+	for i = 1, units and #units or 0 do
+		local u = units[i]
+		local roles = u.Roles
+		local fcr = false
+		for j = 1, roles and #roles or 0 do
+			if LOCK_ROLES[roles[j]] then
+				fcr = true
+				break
+			end
+		end
+		if fcr and u.UnitName and u.OperationalStatus ~= Medusa.Constants.UnitOperationalStatus.DESTROYED then
+			local unit = GetUnit(u.UnitName)
+			if unit then
+				local _, tracked = GetUnitRadar(unit)
+				local trackId = tracked and tracked.id_ and self._trackManager:getTrackIdByNetworkId(tracked.id_)
+				local track = trackId and self._trackManager:getStore():get(trackId)
+				if track and track.LifecycleState == Medusa.Constants.TrackLifecycleState.ACTIVE then
+					n = n + 1
+					out[n] = trackId
+				end
+			end
+		end
+	end
+	for i = n + 1, #out do
+		out[i] = nil
+	end
+	return n
+end
+
+function Medusa.Core.IadsNetwork:_handleShot(unitId, weaponTypeName, weapon)
 	local battery, unit = self._assetIndex:batteryRepository():getByUnitId(unitId)
 	if not battery then
 		self._logger:debug(string.format("shot ignored: no battery for unitId=%s", tostring(unitId)))
@@ -1105,11 +1741,22 @@ function Medusa.Core.IadsNetwork:_handleShot(unitId, weaponTypeName)
 	end
 	local ttk = estimateTTK(engagementRange, targetAlt)
 	battery.MissileInFlightUntil = now + ttk
+	-- A missile launch (SAM or MANPAD; guns are not counted) means a war and loads the net while it flies.
+	if
+		battery.Role ~= Medusa.Constants.BatteryRole.AAA
+		and self._crew
+		and Medusa.Services.CrewFactorsService.isOn(self._doctrine)
+	then
+		Medusa.Services.CrewFactorsService.onLaunch(self._crew, now, self._id, ttk)
+	end
+	if not isLocallyManaged then
+		self:_recordDecoyLaunch(battery, weapon, now, unit)
+	end
 
 	local prevStatus = battery.OperationalStatus
 	local newStatus = Medusa.Entities.Battery.recomputeState(battery)
 	if isManpad then
-		Medusa.Services.ManpadService.onShot(battery, now)
+		Medusa.Services.ManpadService.onShot(battery, now, Medusa.Chance.isTraining(self._doctrine))
 	elseif battery.Role == Medusa.Constants.BatteryRole.AAA then
 		Medusa.Services.AaaService.onShot({
 			networkId = self._id,
@@ -1326,6 +1973,7 @@ function Medusa.Core.IadsNetwork:_fastErectBatteries()
 			erected = erected + 1
 		end
 	end
+	self._fastErectDone = true
 	self._logger:info(string.format("fast erect: %d batteries pre-activated", erected))
 end
 
@@ -1427,6 +2075,7 @@ function Medusa.Core.IadsNetwork:_collectProbeTargets()
 	for i = 1, #batteries do
 		_collectBatteryUnitPositions(batteries[i], typePositions)
 	end
+	self:_collectLocalRadarProbeTargets(typePositions)
 	return typePositions
 end
 
@@ -1521,13 +2170,64 @@ function Medusa.Core.IadsNetwork:_logAssetSummary(now)
 	)
 end
 
+--- Contact-evidence context for a polled group (see SensorPollingService:_observe), written into the poll entry's
+--- reused table: where the radar is, its reach against a 5 m2 target (probed detectionDistanceAir / REACH_RATIO;
+--- nil until probed) and its kind (amplitude resolution).
+local function setSensorCtx(entry, position, detectionRange, kind)
+	local ctx = entry.sensorCtx
+	if not ctx then
+		ctx = {}
+		entry.sensorCtx = ctx
+	end
+	ctx.Position = position
+	ctx.Reach = detectionRange and detectionRange > 0 and detectionRange / Medusa.Constants.ContactEvidence.REACH_RATIO
+		or nil
+	ctx.Kind = kind
+end
+
+--- The sensor groups and batteries to poll this tick. The list and its entries are reused tick to tick; the result
+--- is valid until the next call.
 function Medusa.Core.IadsNetwork:_buildPollList()
-	local list = {}
+	local list = self._pollListBuffer
+	if not list then
+		list = {}
+		self._pollListBuffer = list
+	end
+	local n = 0
+	local function put(groupName, sourceType, scanRateSec)
+		n = n + 1
+		local entry = list[n]
+		if not entry then
+			entry = {}
+			list[n] = entry
+		end
+		entry.groupName = groupName
+		entry.sourceType = sourceType
+		entry.scanRateSec = scanRateSec
+		entry.detectionType = nil
+		entry.localRadar = nil
+		return entry
+	end
 	local sensorNames = self._assetIndex:sensors():getUniqueGroupNames()
 	for i = 1, #sensorNames do
 		local groupName = sensorNames[i]
 		local sensors = self._assetIndex:sensors():getByGroupName(groupName)
-		list[#list + 1] = { groupName = groupName, sourceType = trackSourceForSensor(sensors[1]) }
+		local first = sensors[1]
+		if first and first.IsLocalRadar then
+			-- polled below while lit
+		else
+			local sourceType = trackSourceForSensor(first)
+			local entry =
+				put(groupName, sourceType, Medusa.Core.IadsNetwork._scanRateForSensor(self._doctrine, sourceType))
+			local range = nil
+			for j = 1, #sensors do
+				local s = sensors[j]
+				if s.DetectionRangeMax and (not range or s.DetectionRangeMax > range) then
+					range = s.DetectionRangeMax
+				end
+			end
+			setSensorCtx(entry, first and first.Position, range, "EWR")
+		end
 	end
 	local AS = Medusa.Constants.ActivationState
 	local datalink = self._doctrine and self._doctrine.BatteryTargetDatalink
@@ -1536,9 +2236,39 @@ function Medusa.Core.IadsNetwork:_buildPollList()
 		local b = batteries[i]
 		local canReport = b.ActivationState == AS.STATE_HOT
 			or (b.ActivationState == AS.STATE_WARM and Medusa.Entities.Battery.hasSearchRadar(b))
-		if b.IsActingAsEWR or (datalink and canReport and not Medusa.Entities.Battery.isIndependentAaa(b)) then
-			list[#list + 1] = { groupName = b.GroupName, sourceType = trackSourceForBattery(b) }
+		if
+			not b.LocalRadar
+			and (b.IsActingAsEWR or (datalink and canReport and not Medusa.Entities.Battery.isIndependentAaa(b)))
+		then
+			local sourceType = trackSourceForBattery(b)
+			local entry =
+				put(b.GroupName, sourceType, Medusa.Core.IadsNetwork._scanRateForBattery(self._doctrine, b, sourceType))
+			setSensorCtx(entry, b.Position, b.DetectionRangeMax, Medusa.Core.IadsNetwork._radarKind(b))
 		end
+	end
+	-- Lit local cueing radars, on their radar channel only (a MANPAD crew's eyes are not a radar track), at the
+	-- search rate. Dark ones are not polled: DCS reports nothing from a radar that is off.
+	local records = self._localRadars.records
+	local LocalRadarService = Medusa.Services.LocalRadarService
+	local radarChannel = Controller and Controller.Detection and Controller.Detection.RADAR or nil
+	local searchRate = Medusa.Services.SensorPollingService.scanRateFor(self._doctrine, "SAM_SEARCH")
+	for i = 1, #records do
+		local record = records[i]
+		if LocalRadarService.isUp(record) then
+			local sourceType = record.Kind == LocalRadarService.Kind.SENSOR and TS_EWR or TS_SAM
+			local entry = put(record.GroupName, sourceType, searchRate)
+			entry.detectionType = radarChannel
+			entry.localRadar = record
+			setSensorCtx(
+				entry,
+				record.Position,
+				record.ReachM * Medusa.Constants.ContactEvidence.REACH_RATIO,
+				"SAM_SEARCH"
+			)
+		end
+	end
+	for i = n + 1, #list do
+		list[i] = nil
 	end
 	return list
 end
@@ -1546,6 +2276,7 @@ end
 function Medusa.Core.IadsNetwork:_removeSensorGroup(groupName)
 	local count = self._assetIndex:sensors():removeByGroupName(groupName)
 	if count > 0 then
+		self._localRadarsDirty = true
 		self._logger:info(string.format("sensor group %s despawned, removed %d sensors", groupName, count))
 	end
 end
@@ -1563,6 +2294,100 @@ function Medusa.Core.IadsNetwork:_updateAirborneSensors()
 			end
 		end
 	end
+end
+
+local HEIGHT_LOW_MAX_M = Medusa.Constants.Observer.LOW_MAX_M
+local HEIGHT_HIGH_MIN_M = Medusa.Constants.Observer.HIGH_MIN_M
+local NOT_HOSTILE_ID = {
+	[Medusa.Constants.TrackIdentification.FRIENDLY] = true,
+	[Medusa.Constants.TrackIdentification.WHITEAIR] = true,
+}
+
+local function heightBand(alt)
+	if not alt then
+		return nil
+	end
+	return alt <= HEIGHT_LOW_MAX_M and "low" or (alt >= HEIGHT_HIGH_MIN_M and "high" or "medium")
+end
+
+--- The sensor that made a track (kept on the track for its IDENTIFIED debrief line): group, kind, range. A track
+--- not known friendly is a FIRST_DETECTION debrief line (once per track, when it is made; a re-acquired track keeps
+--- its FirstSeenBy, so none again).
+function Medusa.Core.IadsNetwork:_noteFirstSensor(track, source, report)
+	track.FirstSeenBy = source.groupName
+	local sensorCtx = source.sensorCtx
+	track.FirstSeenKind = (sensorCtx and sensorCtx.Kind) or source.sourceType
+	local sp, rp = sensorCtx and sensorCtx.Position, report.Position
+	if sp and rp then
+		local dx, dz = rp.x - sp.x, rp.z - sp.z
+		track.FirstSeenRangeM = math.sqrt(dx * dx + dz * dz)
+	end
+	local id = track.TrackIdentification or Medusa.Constants.TrackIdentification.UNKNOWN
+	if NOT_HOSTILE_ID[id] then
+		return
+	end
+	local display = Medusa.Entities.Track.displayId(track)
+	local alt = track.Position and track.Position.y or nil
+	Medusa.Debrief.emit(
+		self._id,
+		nil,
+		"FIRST_DETECTION",
+		"track",
+		display,
+		"id",
+		id,
+		"sensor",
+		track.FirstSeenBy or "unknown",
+		"kind",
+		track.FirstSeenKind or track.OriginSourceType,
+		"range_km",
+		track.FirstSeenRangeM and string.format("%.1f", track.FirstSeenRangeM / 1000) or nil,
+		"alt_m",
+		alt and string.format("%.0f", alt) or nil,
+		"alt_band",
+		heightBand(alt)
+	)
+end
+
+--- IDENTIFIED: the first time the network identifies a track BANDIT or HOSTILE (once per track), with the sensor
+--- that first held it, its range from that sensor and how long the network held it before the call.
+function Medusa.Core.IadsNetwork:_onTrackIdentified(track, from, to)
+	local TI = Medusa.Constants.TrackIdentification
+	if (to ~= TI.HOSTILE and to ~= TI.BANDIT) or track.DebriefIdentified then
+		return
+	end
+	-- A re-acquired or re-associated track arrives already BANDIT/HOSTILE: the network identified it before.
+	if from == TI.HOSTILE or from == TI.BANDIT then
+		track.DebriefIdentified = true
+		return
+	end
+	track.DebriefIdentified = true
+	local now = GetTime()
+	local alt = track.Position and track.Position.y or nil
+	local band = heightBand(alt)
+	Medusa.Debrief.emit(
+		self._id,
+		now,
+		"IDENTIFIED",
+		"track",
+		Medusa.Entities.Track.displayId(track),
+		"id",
+		to,
+		"from_id",
+		from,
+		"sensor",
+		track.FirstSeenBy or "unknown",
+		"kind",
+		track.FirstSeenKind or track.OriginSourceType,
+		"range_km",
+		track.FirstSeenRangeM and string.format("%.1f", track.FirstSeenRangeM / 1000) or nil,
+		"alt_m",
+		alt and string.format("%.0f", alt) or nil,
+		"alt_band",
+		band,
+		"held_s",
+		track.FirstDetectionTime and string.format("%.0f", now - track.FirstDetectionTime) or nil
+	)
 end
 
 function Medusa.Core.IadsNetwork:_pollSensors()
@@ -1584,7 +2409,14 @@ function Medusa.Core.IadsNetwork:_pollSensors()
 		end
 		local source = pollList[idx]
 		local name = source.groupName
-		local reports = self._sensorPollingService:pollSensor(name, now, source.sourceType)
+		local reports = self._sensorPollingService:pollSensor(
+			name,
+			now,
+			source.sourceType,
+			source.scanRateSec,
+			source.sensorCtx,
+			source.detectionType
+		)
 		if not reports then
 			self:_removeSensorGroup(name)
 		else
@@ -1594,7 +2426,18 @@ function Medusa.Core.IadsNetwork:_pollSensors()
 			end
 			totalDetections = totalDetections + #reports
 			for i = 1, #reports do
-				self._trackManager:processReport(reports[i], now)
+				local track = self._trackManager:processReport(reports[i], now)
+				if type(track) == "table" and track.FirstSeenBy == nil then
+					self:_noteFirstSensor(track, source, reports[i])
+				end
+			end
+			if source.localRadar and #reports > 0 then
+				Medusa.Services.LocalRadarService.onRadarContacts(
+					self:_localPictureCtx(),
+					source.localRadar,
+					reports,
+					self._trackManager
+				)
 			end
 		end
 		idx = idx + 1
@@ -1635,6 +2478,20 @@ function Medusa.Core.IadsNetwork:_runPhase()
 	ctx.now = GetTime()
 	ctx.maxRange = self._maxEngagementRange
 	ctx.doctrine = self._doctrine
+	ctx.networkId = self._id
+	ctx.holdBreaksTypes = self._holdBreaksTypes
+	if not self._lockReader then
+		local network = self
+		self._lockReader = function(battery, out)
+			return network:_lockedTracksOf(battery, out)
+		end
+	end
+	ctx.lockedTracksOf = self._lockReader
+	-- Operators of a busy net take longer to identify (crew factors): identification timers x this.
+	ctx.idDwellFactor = 1
+	if self._crew and Medusa.Services.CrewFactorsService.isOn(self._doctrine) then
+		ctx.idDwellFactor = 1 + Medusa.Constants.CrewFactors.ID_DWELL_LOAD_FACTOR * self._crew.load
+	end
 	ctx.borderPolygons = self._borderPolygons
 	ctx.adizPolygon = self._adizPolygon
 	ctx.coalitionId = self._coalitionId
@@ -1716,6 +2573,7 @@ function Medusa.Core.IadsNetwork:_phaseHarmAndPD(ctx)
 	local allTracks = ctx.trackStore:getAll(_assignBatteryBuffer)
 	local trackCount = #allTracks
 	local ballisticDt, ballisticMaxT = HDS.getAssessContext(ctx)
+	local emitters = HDS.buildEmitterIndex(ctx.batteryStore)
 
 	local totalBudget = math.max(step.budget, math.ceil(trackCount * 0.25))
 
@@ -1723,18 +2581,28 @@ function Medusa.Core.IadsNetwork:_phaseHarmAndPD(ctx)
 	local AAT = Medusa.Constants.AssessedAircraftType
 	local keys = self._harmPriorityKeys
 	local sortBuf = self._harmSortBuffer
+	local TI = Medusa.Constants.TrackIdentification
+	local isProbableDecoy = Medusa.Services.DecoyAssessmentService.isProbable
+	local arms, aircraft = 0, 0
 	for i = 1, trackCount do
 		local track = allTracks[i]
 		if track.AssessedAircraftType == AAT.HARM then
 			keys[i] = math.huge
+			arms = arms + 1
 		else
 			local vel = track.Velocity
 			local alt = track.Position and track.Position.y or 0
 			local speed = vel and VecLength2D(vel) or 0
 			keys[i] = alt * speed
+			local id = track.TrackIdentification
+			if (id == TI.HOSTILE or id == TI.BANDIT) and not isProbableDecoy(track) then
+				aircraft = aircraft + 1
+			end
 		end
 		sortBuf[i] = i
 	end
+	self._armsInbound = arms
+	self._aircraftTracks = aircraft
 	-- Clear excess entries from previous tick
 	for i = trackCount + 1, #sortBuf do
 		sortBuf[i] = nil
@@ -1744,9 +2612,22 @@ function Medusa.Core.IadsNetwork:_phaseHarmAndPD(ctx)
 	end
 
 	-- Sort indices descending by priority key
-	table.sort(sortBuf, function(a, b)
-		return keys[a] > keys[b]
-	end)
+	local byPriority = self._harmPriorityCompare
+	if not byPriority then
+		byPriority = function(a, b)
+			return keys[a] > keys[b]
+		end
+		self._harmPriorityCompare = byPriority
+	end
+	table.sort(sortBuf, byPriority)
+
+	-- The tracks this pass visits are the decoy assessment's too (each judged at most once per new scan).
+	local visited = self._decoyVisited
+	if not visited then
+		visited = {}
+		self._decoyVisited = visited
+	end
+	local visitedCount = 0
 
 	-- Pass 1: Priority tier -- top 1/3, evaluated every tick
 	local priorityCount = math.ceil(trackCount / 3)
@@ -1754,8 +2635,19 @@ function Medusa.Core.IadsNetwork:_phaseHarmAndPD(ctx)
 	for i = 1, priorityCount do
 		local track = allTracks[sortBuf[i]]
 		if track and track.LifecycleState == _LS.ACTIVE then
-			HDS.assessSingleTrack(track, allTracks, ctx.geoGrid, ctx.batteryStore, ballisticDt, ballisticMaxT)
+			HDS.assessSingleTrack(
+				track,
+				allTracks,
+				ctx.geoGrid,
+				ctx.batteryStore,
+				ballisticDt,
+				ballisticMaxT,
+				emitters,
+				ctx.networkId
+			)
 			priorityProcessed = priorityProcessed + 1
+			visitedCount = visitedCount + 1
+			visited[visitedCount] = track
 		end
 	end
 
@@ -1783,11 +2675,32 @@ function Medusa.Core.IadsNetwork:_phaseHarmAndPD(ctx)
 		if not track then
 			break
 		end
-		HDS.assessSingleTrack(track, allTracks, ctx.geoGrid, ctx.batteryStore, ballisticDt, ballisticMaxT)
+		HDS.assessSingleTrack(
+			track,
+			allTracks,
+			ctx.geoGrid,
+			ctx.batteryStore,
+			ballisticDt,
+			ballisticMaxT,
+			emitters,
+			ctx.networkId
+		)
 		normalProcessed = normalProcessed + 1
+		visitedCount = visitedCount + 1
+		visited[visitedCount] = track
+	end
+	for i = visitedCount + 1, #visited do
+		visited[i] = nil
 	end
 
 	logChunk(self._logger, ctx.MS, "harm_detect", priorityProcessed + normalProcessed, step:remaining())
+
+	-- Decoy assessment and response (after HARM labels, before point defence reads glide threats), in its own pcall
+	-- so a failure there cannot skip HARM response and point defence.
+	local decoyOk, decoyErr = pcall(self._phaseDecoy, self, ctx, visitedCount)
+	if not decoyOk then
+		self._logger:error(string.format("decoy pass failed: %s", tostring(decoyErr)))
+	end
 
 	-- Full-pass: HARM response + PD (usually few HARMs, not worth chunking)
 	Medusa.Services.HarmResponseService.executeResponse(ctx)
@@ -1801,6 +2714,11 @@ function Medusa.Core.IadsNetwork:_phaseHarmAndPD(ctx)
 	ctx.MS.observe("medusa_harm_eval_duration_seconds", ctx.hpt() - t1)
 end
 
+function Medusa.Core.IadsNetwork:_phaseDecoy(ctx, visitedCount)
+	Medusa.Services.DecoyAssessmentService.assess(ctx, self._decoyVisited, visitedCount)
+	Medusa.Services.DecoyResponseService.update(ctx)
+end
+
 -- Phase 2: EMCON self-assign + WTA assignment + retry goHot (full pass, greedy)
 function Medusa.Core.IadsNetwork:_phaseAssign(ctx)
 	local TargetAssigner = Medusa.Services.TargetAssigner
@@ -1811,8 +2729,8 @@ function Medusa.Core.IadsNetwork:_phaseAssign(ctx)
 	for i = 1, #autoAssignments do
 		local a = autoAssignments[i]
 		local battery = ctx.batteryStore:get(a.batteryId)
-		if battery and BAS.goHot(battery, ctx.now) then
-			local track = ctx.trackStore:get(a.trackId)
+		local track = ctx.trackStore:get(a.trackId)
+		if battery and BAS.goHot(battery, ctx.now, "emcon_self_assign", track) then
 			self._logger:info(
 				string.format(
 					"battery %s HOT (EMCON self-assign) for track %s",
@@ -1831,7 +2749,7 @@ function Medusa.Core.IadsNetwork:_phaseAssign(ctx)
 			Medusa.Services.ManpadService.cueFromIADS(ctx, track.Position)
 		end
 		local battery = ctx.batteryStore:get(a.batteryId)
-		if battery and BAS.goHot(battery, ctx.now) then
+		if battery and BAS.goHot(battery, ctx.now, "assigned", track) then
 			self._logger:info(
 				string.format("battery %s HOT for track %s", a.batteryId, Medusa.Entities.Track.displayId(track))
 			)
@@ -1843,8 +2761,8 @@ function Medusa.Core.IadsNetwork:_phaseAssign(ctx)
 	for i = 1, #allBatteries do
 		local battery = allBatteries[i]
 		if battery.CurrentTargetTrackId and battery.ActivationState ~= AS.STATE_HOT then
-			if BAS.goHot(battery, ctx.now) then
-				local track = ctx.trackStore:get(battery.CurrentTargetTrackId)
+			local track = ctx.trackStore:get(battery.CurrentTargetTrackId)
+			if BAS.goHot(battery, ctx.now, "assigned", track) then
 				self._logger:info(
 					string.format(
 						"battery %s HOT for track %s (retry)",
@@ -1948,6 +2866,9 @@ function Medusa.Core.IadsNetwork:_runManpadPhase()
 	ctx.posture = self._doctrine and self._doctrine.Posture or Medusa.Constants.Posture.HOT_WAR
 	ctx.doctrine = self._doctrine
 	ctx.coalitionId = self._coalitionId
+	ctx.surprised = self._crew ~= nil
+		and Medusa.Services.CrewFactorsService.isOn(self._doctrine)
+		and self._crew.readiness == Medusa.Constants.Readiness.SURPRISED
 	local MS = Medusa.Services.MetricsService
 	local hpt = Medusa.hpTimer
 	local t1 = hpt()
@@ -2063,8 +2984,20 @@ function Medusa.Core.IadsNetwork:_applyDynamicBatteryRanges(battery)
 	end)
 end
 
+--- Probes the reach of every radar type the network holds (once, at the first tick). With nothing to probe (every
+--- group late-activated) probing is complete at once, so radar groups added later are classified.
+function Medusa.Core.IadsNetwork:_startProbing()
+	local iads = self
+	self._probingService:probeAll(self:_collectProbeTargets(), function()
+		iads:_onProbingComplete()
+	end)
+end
+
 function Medusa.Core.IadsNetwork:_onProbingComplete()
 	local probing = self._probingService
+	self._probeComplete = true
+	self:_resolveDeferredGroups()
+	self:_applyManpadRadarRanges()
 	local sensorCount = probing:applySensorRanges(self._assetIndex:sensors())
 	local batteryCount = probing:applyBatteryRanges(self._assetIndex:batteries())
 	self._logger:info(
@@ -2075,6 +3008,7 @@ function Medusa.Core.IadsNetwork:_onProbingComplete()
 		self._spatialIndex:syncBattery(batteries[i])
 		self:_updateMaxEngagementRange(batteries[i])
 	end
+	self:_classifyLocalRadars()
 end
 
 function Medusa.Core.IadsNetwork:tick()
@@ -2085,6 +3019,7 @@ function Medusa.Core.IadsNetwork:tick()
 
 	local MetricsService = Medusa.Services.MetricsService
 	MetricsService.setContext(self._metricLabels)
+	Medusa.Debrief.setNetwork(self._id)
 	MetricsService.inc("medusa_ticks_total")
 
 	local now = GetTime()
@@ -2100,12 +3035,7 @@ function Medusa.Core.IadsNetwork:tick()
 		self:_fastErectBatteries()
 		self:_applyInitialCrewSuppression(now)
 		self:_probeAirborneSensors()
-		local typePositions = self:_collectProbeTargets()
-		if next(typePositions) then
-			self._probingService:probeAll(typePositions, function()
-				self:_onProbingComplete()
-			end)
-		end
+		self:_startProbing()
 		-- Defer doctrine state application until erect animations complete
 		local network = self
 		ScheduleOnce(function()
@@ -2148,19 +3078,28 @@ function Medusa.Core.IadsNetwork:tick()
 	self._trackManager:pruneStale(now)
 	MetricsService.observe("medusa_prune_stale_duration_seconds", hpt() - t1)
 
-	if self._erectComplete and (self._tickCounter % self._assignmentInterval) == 0 then
+	if self._erectComplete and ((self._tickCounter + self._phaseOffset) % self._assignmentInterval) == 0 then
 		self:_runPhase()
 	end
 
-	if self._erectComplete and (self._tickCounter % self._manpadInterval) == 0 then
+	if self._erectComplete and ((self._tickCounter + self._phaseOffset) % self._manpadInterval) == 0 then
 		self:_runManpadPhase()
 	end
 
-	if self._erectComplete and (self._tickCounter % self._aaaInterval) == 0 then
+	if self._erectComplete and ((self._tickCounter + self._phaseOffset) % self._aaaInterval) == 0 then
 		self:_runAaaPhase()
 	end
 
-	if self._erectComplete and (self._tickCounter % self._unitPosRefreshInterval) == 0 then
+	if self._erectComplete and ((self._tickCounter + self._phaseOffset) % self._localPictureInterval) == 5 then
+		self:_runLocalPicturePhase()
+	end
+
+	if self._erectComplete then
+		self:_runObserverLook()
+		self:_runEsmLook()
+	end
+
+	if self._erectComplete and ((self._tickCounter + self._phaseOffset) % self._unitPosRefreshInterval) == 0 then
 		self:_runUnitPositionRefreshPhase()
 	end
 
@@ -2219,6 +3158,7 @@ function Medusa.Core.IadsNetwork:_onTick()
 			end
 			for i = 1, #batteries do
 				pcall(Medusa.Services.BatteryActivationService.erectGroup, batteries[i].GroupName)
+				pcall(Medusa.Services.BatteryActivationService.releaseDecoyResponse, batteries[i])
 			end
 			self:_releaseLocalDefenses()
 			self._running = false

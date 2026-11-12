@@ -40,6 +40,14 @@ local BatteryActivationService = Medusa.Services.BatteryActivationService
 local SENSOR_ROLES = { EWR = true, GCI = true }
 local _minimizeWarned = {}
 
+--- The EMCON policy the mission sets for `role` (doctrine EMCON), or nil when it leaves the role to the built-in
+--- default. Local cues (observer reports, a crew's own sighting, local radar sweeps) never override a policy the
+--- mission sets.
+function Medusa.Services.EmconService.missionPolicy(doctrine, role)
+	local emcon = doctrine and doctrine.EMCON
+	return type(emcon) == "table" and emcon[role] or nil
+end
+
 function Medusa.Services.EmconService.getDesiredState(batteryIndex, _batteryCount, doctrine, now, role)
 	local policy = doctrine.EMCON and doctrine.EMCON[role] or C.EMCON_DEFAULT_POLICY_BY_ROLE[role]
 
@@ -106,8 +114,13 @@ function Medusa.Services.EmconService.getDesiredState(batteryIndex, _batteryCoun
 	return AS.STATE_WARM
 end
 
-local function _shouldSkip(battery)
+local function _shouldSkip(battery, now)
 	if Medusa.Entities.Battery.isCrewSuppressed(battery) then
+		return true
+	end
+	-- Held up WARM by a local cue (local cueing radar, observer report, the crew's own sighting) until then. Reports
+	-- and sightings set it only for roles whose EMCON the mission leaves to the default (ObserverReportService).
+	if battery.CueWarmUntil and now < battery.CueWarmUntil then
 		return true
 	end
 	if Medusa.Entities.Battery.isIndependentAaa(battery) then
@@ -220,6 +233,42 @@ function Medusa.Services.EmconService.logSchedule(ctx)
 	)
 end
 
+--- Puts a ground sensor group's radar on (STATE_WARM: emitting, alarm red) or off (STATE_COLD: weapons hold, alarm
+--- green, AI off) when that differs from what was last written, and sets the sensors' RadarStatus. Local cueing radars
+--- (LocalRadarService) use it too; EMCON leaves those groups alone. Returns true when the group was switched.
+function Medusa.Services.EmconService.setSensorGroupState(groupName, sensors, desired)
+	local switched = false
+	local currentState = _sensorGroupState[groupName]
+	if currentState == nil or desired ~= currentState then
+		local controller = GetGroupController(groupName)
+		if controller then
+			if desired == AS.STATE_WARM then
+				SetControllerOnOff(controller, true)
+				ControllerSetROE(controller, "OPEN_FIRE")
+				ControllerSetAlarmState(controller, "RED")
+			else
+				ControllerSetROE(controller, "WEAPON_HOLD")
+				ControllerSetAlarmState(controller, "GREEN")
+				SetControllerOnOff(controller, false)
+			end
+			local group = GetGroup(groupName)
+			if group then
+				EnableGroupEmissions(group, desired == AS.STATE_WARM)
+			end
+			_sensorGroupState[groupName] = desired
+			switched = true
+		end
+	end
+	local effectiveState = _sensorGroupState[groupName] or AS.STATE_COLD
+	local radarStatus = (effectiveState == AS.STATE_WARM) and "ACTIVE" or "DARK"
+	if sensors then
+		for si = 1, #sensors do
+			sensors[si].RadarStatus = radarStatus
+		end
+	end
+	return switched
+end
+
 function Medusa.Services.EmconService.applyPolicy(ctx, network)
 	local batteryStore = ctx.batteryStore
 	local sensorStore = ctx.sensorStore
@@ -260,7 +309,7 @@ function Medusa.Services.EmconService.applyPolicy(ctx, network)
 			battery.IsActingAsEWR = false
 		end
 
-		if not _shouldSkip(battery) then
+		if not _shouldSkip(battery, now) then
 			local desired
 			if battery.IsActingAsEWR then
 				desired = Medusa.Services.EmconService.getDesiredState(i, count, doctrine, now, "EWR")
@@ -293,32 +342,12 @@ function Medusa.Services.EmconService.applyPolicy(ctx, network)
 			end
 		else
 			local sensorType = sensors and sensors[1] and sensors[1].SensorType or "EWR"
-			local desired = Medusa.Services.EmconService.getDesiredState(i, #sensorGroups, doctrine, now, sensorType)
-			local currentState = _sensorGroupState[groupName]
-			if currentState == nil or desired ~= currentState then
-				local controller = GetGroupController(groupName)
-				if controller then
-					if desired == AS.STATE_WARM then
-						SetControllerOnOff(controller, true)
-						ControllerSetROE(controller, "OPEN_FIRE")
-						ControllerSetAlarmState(controller, "RED")
-					else
-						ControllerSetROE(controller, "WEAPON_HOLD")
-						ControllerSetAlarmState(controller, "GREEN")
-						SetControllerOnOff(controller, false)
-					end
-					local group = GetGroup(groupName)
-					if group then
-						EnableGroupEmissions(group, desired == AS.STATE_WARM)
-					end
-					_sensorGroupState[groupName] = desired
+			if not (sensors and sensors[1] and sensors[1].IsLocalRadar) then
+				local desired =
+					Medusa.Services.EmconService.getDesiredState(i, #sensorGroups, doctrine, now, sensorType)
+				if Medusa.Services.EmconService.setSensorGroupState(groupName, sensors, desired) then
 					transitions = transitions + 1
 				end
-			end
-			local effectiveState = _sensorGroupState[groupName] or AS.STATE_COLD
-			local radarStatus = (effectiveState == AS.STATE_WARM) and "ACTIVE" or "DARK"
-			for si = 1, #sensors do
-				sensors[si].RadarStatus = radarStatus
 			end
 		end
 	end

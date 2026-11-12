@@ -212,6 +212,9 @@ do
 				cause or C.CrewSuppressionCause.DAMAGE
 			)
 		)
+		if ctx.onRecovered then
+			ctx.onRecovered(battery)
+		end
 		return true
 	end
 

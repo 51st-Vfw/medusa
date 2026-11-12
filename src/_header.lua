@@ -99,16 +99,24 @@
             ██║ ╚═╝ ██║███████╗██████╔╝╚██████╔╝███████║██║  ██║    ██║██║  ██║██████╔╝███████║
             ╚═╝     ╚═╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝    ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝
 
-            "{{VERSION}}"
+            Black Knight Edition (BKE) v{{VERSION}} (based on Medusa v{{MEDUSA_BASE}})
 
             Author: YoloWingPixie
+            Black Knight Edition: 667th Black Knights / 51st VFW (dogjutsu)
 --]]
 
 -- selene: allow(unscoped_variables)
 Medusa = {}
-Medusa.version = "{{VERSION}}"
+-- [BKE] Medusa.version carries a "BKE" prefix (e.g. "BKEv0.0.1") so it is never mistaken for a stock Medusa
+-- version; the stock Medusa release this edition is based on is Medusa.baseVersion.
+Medusa.version = "BKEv{{VERSION}}"
 Medusa.Author = "YoloWingPixie"
 Medusa.Contributors = {}
+
+Medusa.edition = "Black Knight Edition (BKE)"
+Medusa.baseVersion = "{{MEDUSA_BASE}}"
+Medusa.displayName =
+	string.format("Medusa IADS - %s v%s (based on Medusa v%s)", Medusa.edition, "{{VERSION}}", Medusa.baseVersion)
 
 -- High-precision timer: os.clock() if available (microsecond CPU time), else GetTime() (1ms mission time)
 -- selene: allow(undefined_variable)

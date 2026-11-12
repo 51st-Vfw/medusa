@@ -15,7 +15,8 @@ Example .buildrc:
 
 This script requires .buildrc to exist and will fail if required fields are missing.
 Required fields: src_dir, dist_dir, output, module_roots.
-Optional fields: prepend, strip_requires, exclude_globs.
+Optional fields: prepend, strip_requires, exclude_globs, bundled_output
+(file name of the bundled artifact written next to "output"; default "medusa.lua").
 """
 
 import json
@@ -354,7 +355,7 @@ def main(argv: list[str]) -> int:
                 bundled_text = preamble + header_block + harness_block + rest_text
             else:
                 bundled_text = harness_block + base_text
-            bundled_path = out.parent / "medusa.lua"
+            bundled_path = out.parent / cfg.get("bundled_output", "medusa.lua")
             bundled_path.write_text(bundled_text, encoding="utf-8")
             print(f"Built {bundled_path.resolve()}")
         else:

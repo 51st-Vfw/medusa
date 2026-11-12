@@ -90,6 +90,40 @@ function Medusa.Services.ApiService.getPosture(networkName)
 	return iads:getDoctrine().Posture
 end
 
+--- Sets the network's readiness now (SURPRISED / ALERTED / ENGAGED). The mission's own call: it may also lower it
+--- (a new phase, a ceasefire); from there it rises again on its own as events happen.
+function Medusa.Services.ApiService.setReadiness(networkName, readinessValue)
+	if type(readinessValue) ~= "string" or not Medusa.Constants.Readiness[readinessValue] then
+		_logger:error(string.format("invalid Readiness value: %s", tostring(readinessValue)))
+		return false
+	end
+	local iads = Medusa.Core.IadsById[tostring(networkName)]
+	if not iads then
+		_logger:error(string.format("network not found: %s", tostring(networkName)))
+		return false
+	end
+	local prev = Medusa.Services.ApiService.getReadiness(networkName)
+	if iads.setReadiness then
+		iads:setReadiness(readinessValue, "api")
+	else
+		iads:getDoctrine().Readiness = readinessValue
+	end
+	_logger:info(string.format("network %s Readiness changed: %s -> %s", networkName, tostring(prev), readinessValue))
+	return true
+end
+
+--- The network's readiness now (it rises during the mission from the doctrine's starting value).
+function Medusa.Services.ApiService.getReadiness(networkName)
+	local iads = Medusa.Core.IadsById[tostring(networkName)]
+	if not iads then
+		return nil
+	end
+	if iads.getReadiness then
+		return iads:getReadiness()
+	end
+	return iads:getDoctrine().Readiness
+end
+
 local function isValidEmconPolicy(value)
 	for _, v in pairs(Medusa.Constants.EmissionControlPolicy) do
 		if v == value then

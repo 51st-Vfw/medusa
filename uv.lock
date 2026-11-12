@@ -16,8 +16,8 @@ wheels = [
 ]
 
 [[package]]
-name = "medusa"
-version = "1.6.0"
+name = "medusa-bke"
+version = "0.0.1"
 source = { virtual = "." }
 
 [package.dev-dependencies]

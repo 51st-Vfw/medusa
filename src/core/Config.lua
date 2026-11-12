@@ -85,7 +85,7 @@ function Medusa.Config:initialize()
 	-- selene: allow(undefined_variable)
 	local overrides = (type(MEDUSA_CONFIG) == "table") and MEDUSA_CONFIG or {}
 
-	local DEFAULT_ROLES = { HQ = "hq", GCI = "gci", EWR = "ewr", AWACS = "awacs" }
+	local DEFAULT_ROLES = { HQ = "hq", GCI = "gci", EWR = "ewr", AWACS = "awacs", OBSERVER = "obs", ESM = "esm" }
 	local DEFAULT_NETWORKS = {
 		{
 			name = "DEFAULT",
@@ -100,6 +100,8 @@ function Medusa.Config:initialize()
 			GCI = (overrides.Roles and overrides.Roles.GCI) or DEFAULT_ROLES.GCI,
 			EWR = (overrides.Roles and overrides.Roles.EWR) or DEFAULT_ROLES.EWR,
 			AWACS = (overrides.Roles and overrides.Roles.AWACS) or DEFAULT_ROLES.AWACS,
+			OBSERVER = (overrides.Roles and overrides.Roles.OBSERVER) or DEFAULT_ROLES.OBSERVER,
+			ESM = (overrides.Roles and overrides.Roles.ESM) or DEFAULT_ROLES.ESM,
 		},
 		Networks = (overrides.Networks and type(overrides.Networks) == "table" and overrides.Networks)
 			or DEFAULT_NETWORKS,
@@ -133,6 +135,8 @@ function Medusa.Config:getRoleTokens()
 		GCI = string.lower(tokens.GCI),
 		EWR = string.lower(tokens.EWR),
 		AWACS = string.lower(tokens.AWACS or "awacs"),
+		OBSERVER = string.lower(type(tokens.OBSERVER) == "string" and tokens.OBSERVER or "obs"),
+		ESM = string.lower(type(tokens.ESM) == "string" and tokens.ESM or "esm"),
 	}
 end
 

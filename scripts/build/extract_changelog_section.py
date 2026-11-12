@@ -6,7 +6,8 @@ from pathlib import Path
 
 def extract_section(tag: str, changelog: Path) -> str:
     content = changelog.read_text(encoding="utf-8")
-    version = tag.lstrip("v")
+    # [BKE] Release tags are BKEv<version>; the changelog headings carry the plain version.
+    version = tag.removeprefix("BKE").lstrip("v")
     # Match heading like: ## [0.2.0] - YYYY-MM-DD
     pat = re.compile(rf"(?ms)^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)")
     m = pat.search(content)

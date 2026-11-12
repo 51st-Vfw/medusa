@@ -785,3 +785,41 @@ function TestAaaService:test_radar_loss_returns_site_to_independent_cold_state()
 	lu.assertEquals(withdrawnId, site.BatteryId)
 	lu.assertEquals(syncedBattery, site)
 end
+
+function TestAaaService:test_cued_crew_sees_all_round_until_the_cue_ends()
+	math.random = function()
+		return 0.9
+	end
+	-- The gun faces +x; the aircraft is behind it, 5 km away, out of earshot.
+	local site = battery()
+	local ctx = context(site, { target("aircraft", -5000, 500, 0) })
+	ctx.doctrine.AAA.AudioRangeM = 0
+	Medusa.Services.AaaService.evaluate(ctx)
+	lu.assertEquals(site.Aaa.ResponseState, C.Aaa.ResponseState.IDLE)
+
+	lu.assertTrue(Medusa.Services.AaaService.cue(site, 120))
+	ctx.now = 10
+	Medusa.Services.AaaService.evaluate(ctx)
+	lu.assertEquals(site.Aaa.ResponseState, C.Aaa.ResponseState.ALERT)
+	lu.assertEquals(self.metricCounts.medusa_aaa_visual_detections_total, 1)
+
+	local later = battery({ BatteryId = "aaa-2" })
+	later.Aaa.CuedUntil = 5
+	local laterCtx = context(later, { target("aircraft", -5000, 500, 0) })
+	laterCtx.doctrine.AAA.AudioRangeM = 0
+	laterCtx.now = 10
+	Medusa.Services.AaaService.evaluate(laterCtx)
+	lu.assertEquals(later.Aaa.ResponseState, C.Aaa.ResponseState.IDLE, "an expired cue is ignored")
+end
+
+function TestAaaService:test_cue_never_changes_radar_directed_guns()
+	local site = battery()
+	site.DetectionRangeMax = 20000
+	site.Units[2] = Medusa.Entities.Battery.newUnit({
+		UnitId = 2,
+		UnitName = "radar-1",
+		Roles = { C.BatteryUnitRole.SEARCH_RADAR },
+	})
+	lu.assertFalse(Medusa.Services.AaaService.cue(site, 120))
+	lu.assertNil(site.Aaa.CuedUntil)
+end

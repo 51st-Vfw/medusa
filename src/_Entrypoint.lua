@@ -4,6 +4,7 @@ require("core.Config")
 require("core.Logger")
 require("core.IadsNetwork")
 require("services.ApiService")
+require("services.AlertZoneService")
 require("services.BlackBoxService")
 require("services.stores.MissionUnitSkillIndex")
 require("services.stores.BlackBoxWeaponStore")
@@ -22,7 +23,9 @@ require("services.stores.BlackBoxWeaponStore")
 Medusa.Config:initialize()
 Medusa.Logger:initialize(Medusa.Config)
 local _entryLog = Medusa.Logger:ns("Entrypoint")
-_entryLog:info(string.format("Medusa IADS v%s by %s", tostring(Medusa.version), Medusa.Author))
+-- [BKE] The banner names the edition and the Medusa release it is based on.
+_entryLog:info(Medusa.displayName)
+_entryLog:info(string.format("Medusa by %s; %s by the 667th Black Knights / 51st VFW", Medusa.Author, Medusa.edition))
 if #Medusa.Contributors > 0 then
 	_entryLog:info("Contributors: " .. table.concat(Medusa.Contributors, ", "))
 end
@@ -74,6 +77,25 @@ for i = 1, #nets do
 	iads:start()
 end
 
+-- Mission-editor alert zones: write flags from the networks' tracks (opt-in through zone properties)
+do
+	local alertNets = {}
+	for i = 1, #nets do
+		local iads = Medusa.Core.IadsById[nets[i].id]
+		if iads then
+			alertNets[#alertNets + 1] = { id = nets[i].id, coalitionId = nets[i].coalitionId, iads = iads }
+		end
+	end
+	local meZones = nil
+	pcall(function()
+		meZones = env.mission.triggers.zones
+	end)
+	local ok, err = pcall(Medusa.Services.AlertZoneService.start, meZones, alertNets)
+	if not ok then
+		_entryLog:error("alert zones failed to start: " .. tostring(err))
+	end
+end
+
 Medusa.Services.MetricsSnapshotService.installSnapshot()
 
 -- Public API for runtime control by other mission scripts
@@ -82,6 +104,8 @@ Medusa.API = {
 	getROE = Medusa.Services.ApiService.getROE,
 	setPosture = Medusa.Services.ApiService.setPosture,
 	getPosture = Medusa.Services.ApiService.getPosture,
+	setReadiness = Medusa.Services.ApiService.setReadiness,
+	getReadiness = Medusa.Services.ApiService.getReadiness,
 	setEMCON = Medusa.Services.ApiService.setEMCON,
 	getEMCON = Medusa.Services.ApiService.getEMCON,
 	setScanTiming = Medusa.Services.ApiService.setScanTiming,

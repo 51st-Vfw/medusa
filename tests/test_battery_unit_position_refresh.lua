@@ -172,3 +172,39 @@ function TestBatteryUnitPositionRefresh:test_unavailable_unit_is_not_polled_agai
 	lu.assertEquals(secondRefresh, 0)
 	lu.assertEquals(calls, 1)
 end
+
+function TestBatteryUnitPositionRefresh:test_rebuild_headings_skips_units_that_already_died()
+	local originalUnitExists = UnitExists
+	local asked = {}
+	UnitExists = function(name)
+		return name ~= "aaa-2-2"
+	end
+	GetUnitHeading = function(name)
+		asked[#asked + 1] = name
+		return 90
+	end
+	local battery = Medusa.Entities.Battery.new({
+		BatteryId = "aaa-2",
+		NetworkId = "test",
+		GroupId = 3,
+		GroupName = "aaa-2",
+		Role = Medusa.Constants.BatteryRole.AAA,
+	})
+	battery.Units = {}
+	for i = 1, 3 do
+		battery.Units[i] = Medusa.Entities.Battery.newUnit({
+			UnitId = 30 + i,
+			UnitName = "aaa-2-" .. i,
+			Roles = { Medusa.Constants.BatteryUnitRole.AAA },
+			Position = { x = 0, y = 0, z = 0 },
+		})
+	end
+	local state = {}
+
+	Medusa.Services.CrewPerceptionService.rebuildHeadings(battery, state, Medusa.Constants.BatteryUnitRole.AAA)
+	UnitExists = originalUnitExists
+
+	lu.assertEquals(asked, { "aaa-2-1", "aaa-2-3" })
+	lu.assertEquals(state.UnitHeadingCount, 2)
+	lu.assertNil(battery.Units[2].HeadingIndex)
+end

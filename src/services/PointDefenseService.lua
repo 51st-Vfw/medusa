@@ -6,6 +6,7 @@ require("core.Constants")
 require("core.Logger")
 require("services.BatteryActivationService")
 require("services.HarmDetectionService")
+require("services.DecoyAssessmentService")
 require("entities.Battery")
 require("entities.Track")
 
@@ -199,7 +200,7 @@ local function tryActivatePd(provider, harmTrack, protectedLabel, now)
 		return false
 	end
 	Medusa.Entities.Battery.assignTrack(provider, harmTrack, now)
-	BatteryActivationService.forceGoHot(provider, now)
+	BatteryActivationService.forceGoHot(provider, now, "point_defence_vs_arm")
 	_logger:info(
 		string.format(
 			"PD %s activated for HARM track %s (protecting %s)",
@@ -274,7 +275,7 @@ function Medusa.Services.PointDefenseService.activateForHarm(harmTrack, geoGrid,
 					)
 				else
 					Medusa.Entities.Battery.assignTrack(battery, harmTrack, now)
-					if BatteryActivationService.forceGoHot(battery, now) then
+					if BatteryActivationService.forceGoHot(battery, now, "self_defence_vs_arm") then
 						_harmActivationBuffer[battery.BatteryId] = true
 						activated = activated + 1
 						_logger:info(
@@ -295,6 +296,18 @@ function Medusa.Services.PointDefenseService.activateForHarm(harmTrack, geoGrid,
 	end
 
 	return activated
+end
+
+--- A released store whose ARM confirmation is held back (unpowered, or still watched for a motor:
+--- HarmDetectionService.confirmBlock) that is predicted to reach the ground within GLIDE_THREAT_RADIUS_M of `pos`
+--- (the site point defence protects): it is a munition falling on the site, so point defence still engages it.
+function Medusa.Services.PointDefenseService.storeFallsOn(track, pos)
+	if not track.Release then
+		return false
+	end
+	local block = Medusa.Services.HarmDetectionService.confirmBlock(track)
+	return (block == "unpowered" or block == "window")
+		and Medusa.Services.DecoyAssessmentService.impactThreatens(track, pos)
 end
 
 function Medusa.Services.PointDefenseService.engageThreats(ctx)
@@ -323,7 +336,12 @@ function Medusa.Services.PointDefenseService.engageThreats(ctx)
 						if
 							track
 							and track.LifecycleState == LS.ACTIVE
-							and (track.AssessedAircraftType == AAT.HARM or track.IsSeadThreat)
+							and (
+								track.AssessedAircraftType == AAT.HARM
+								or track.IsSeadThreat
+								or Medusa.Services.DecoyAssessmentService.glideThreatens(track, protected.Position)
+								or Medusa.Services.PointDefenseService.storeFallsOn(track, protected.Position)
+							)
 						then
 							local dist = Distance2D(track.Position, provider.Position)
 							if dist <= provider.EngagementRangeMax and dist < bestDist then
@@ -334,7 +352,7 @@ function Medusa.Services.PointDefenseService.engageThreats(ctx)
 					end
 					if bestTrack then
 						Medusa.Entities.Battery.assignTrack(provider, bestTrack, now)
-						BatteryActivationService.forceGoHot(provider, now)
+						BatteryActivationService.forceGoHot(provider, now, "point_defence")
 						_logger:info(
 							string.format(
 								"PD %s engaging %s to defend %s",

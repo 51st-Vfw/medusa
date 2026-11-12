@@ -1,7 +1,7 @@
 [project]
-name = "medusa"
-version = "1.6.0"
-description = "Add your description here"
+name = "medusa-bke"
+version = "0.0.1"
+description = "Medusa IADS - Black Knight Edition (BKE): the 667th Black Knights / 51st VFW customised fork of Medusa IADS"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
@@ -13,3 +13,9 @@ quality = [
 
 [tool.uv]
 required-version = "==0.10.12"
+
+# [BKE] The Medusa release this edition is based on, stamped as {{MEDUSA_BASE}}.
+# Keep "version" out of the key name: release tooling finds the project version
+# with an unanchored version = "x.y.z" search.
+[tool.medusa-bke]
+medusa-base = "1.6.0"

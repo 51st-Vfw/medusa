@@ -39,7 +39,9 @@ function Medusa.Services.CrewPerceptionService.rebuildHeadings(battery, observer
 	for i = 1, #units do
 		local unit = units[i]
 		unit.HeadingIndex = nil
-		if Medusa.Entities.Battery.unitHasRole(unit, unitRole) and unit.UnitName then
+		-- Skip a unit that already died (several can die in one blast before their events arrive): its heading
+		-- would log a harness ERROR.
+		if Medusa.Entities.Battery.unitHasRole(unit, unitRole) and unit.UnitName and UnitExists(unit.UnitName) then
 			local headingDegrees = GetUnitHeading(unit.UnitName)
 			if headingDegrees then
 				local radians = math.rad(headingDegrees)

@@ -1,7 +1,13 @@
 name: Feature Request
-description: Suggest an idea
+description: Suggest an idea for Medusa IADS - Black Knight Edition (BKE)
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature ideas are best raised with official Medusa IADS: https://github.com/medusa-iads/medusa/issues
+        BKE does not seek outside contributions; 51st VFW and 667th members with BKE requests should contact Blackdog of the 667th.
+
   - type: textarea
     id: description
     attributes:

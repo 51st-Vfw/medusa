@@ -435,3 +435,135 @@ function TestGetNetworksDoctrine:test_multi_network_independent_doctrines()
 	lu.assertEquals(dB.MANPAD.FieldRadioRangeM, 12000)
 	MEDUSA_CONFIG = nil
 end
+
+-- == Per-kind scan rates resolved at doctrine load ==
+
+TestDoctrineScanRates = {}
+
+function TestDoctrineScanRates:setUp()
+	self.origMemory = Medusa.Config.getTrackMemoryDurationSec
+	self.origError = env.error
+	self.errors = {}
+	local errors = self.errors
+	env.error = function(msg)
+		errors[#errors + 1] = msg
+	end
+end
+
+function TestDoctrineScanRates:tearDown()
+	Medusa.Config.getTrackMemoryDurationSec = self.origMemory
+	env.error = self.origError
+end
+
+local function withTrackMemory(sec)
+	Medusa.Config.getTrackMemoryDurationSec = function()
+		return sec
+	end
+end
+
+function TestDoctrineScanRates:test_defaults()
+	withTrackMemory(30)
+	local rates = Medusa.Entities.Doctrine.new({}).ScanRates
+	lu.assertEquals(rates.EWR, 10)
+	lu.assertEquals(rates.SAM_SEARCH, 5)
+	lu.assertEquals(rates.SAM_TRACK, 2)
+end
+
+function TestDoctrineScanRates:test_explicit_per_track_rate_applies_to_kinds_not_named()
+	withTrackMemory(30)
+	local rates =
+		Medusa.Entities.Doctrine.new({ PerTrackScanUpdateRate = 3, ScanUpdateRateSec = { SAM_TRACK = 1 } }).ScanRates
+	lu.assertEquals(rates.EWR, 3)
+	lu.assertEquals(rates.SAM_SEARCH, 3)
+	lu.assertEquals(rates.SAM_TRACK, 1)
+end
+
+function TestDoctrineScanRates:test_rates_are_capped_at_half_the_track_memory()
+	withTrackMemory(8)
+	local rates = Medusa.Entities.Doctrine.new({ SensorCleanupSec = 30 }).ScanRates
+	lu.assertEquals(rates.EWR, 4)
+	lu.assertEquals(rates.SAM_SEARCH, 4)
+	lu.assertEquals(rates.SAM_TRACK, 2)
+	lu.assertEquals(#self.errors, 2)
+
+	withTrackMemory(0)
+	rates = Medusa.Entities.Doctrine.new({}).ScanRates
+	lu.assertEquals(rates.SAM_TRACK, 1)
+end
+
+function TestDoctrineScanRates:test_a_switch_that_is_not_a_boolean_is_an_error_and_takes_its_default()
+	withTrackMemory(30)
+	local d = Medusa.Entities.Doctrine.new({ TrainingMode = "true", CrewFactors = 0, DecoyTestShots = "no" })
+	lu.assertFalse(d.TrainingMode) -- the string "true" does not switch training on
+	lu.assertTrue(d.CrewFactors)
+	lu.assertTrue(d.DecoyTestShots)
+	lu.assertEquals(#self.errors, 3)
+	lu.assertStrContains(self.errors[1] .. self.errors[2] .. self.errors[3], "TrainingMode")
+	lu.assertStrContains(self.errors[1] .. self.errors[2] .. self.errors[3], "CrewFactors")
+	-- real booleans pass unchanged, with no error
+	local ok = Medusa.Entities.Doctrine.new({ TrainingMode = true, CrewFactors = false })
+	lu.assertTrue(ok.TrainingMode)
+	lu.assertFalse(ok.CrewFactors)
+	lu.assertEquals(#self.errors, 3)
+end
+
+function TestDoctrineScanRates:test_cleanup_shorter_than_the_slowest_rate_is_reported()
+	withTrackMemory(30)
+	Medusa.Entities.Doctrine.new({ SensorCleanupSec = 5 })
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "SensorCleanupSec")
+end
+
+function TestGetDoctrine:test_local_radar_sweeps_switch_and_an_ewr_emcon_reach_the_doctrine()
+	Medusa.Config:initialize()
+	lu.assertTrue(Medusa.Config:getDoctrine({}).LocalRadarSweeps)
+	local d = Medusa.Config:getDoctrine({ LocalRadarSweeps = false, EMCON = { EWR = "MINIMIZE" } })
+	lu.assertFalse(d.LocalRadarSweeps)
+	lu.assertEquals(d.EMCON.EWR, "MINIMIZE")
+end
+
+function TestGetDoctrine:test_readiness_follows_posture_unless_set()
+	Medusa.Config:initialize()
+	local R = Medusa.Constants.Readiness
+	lu.assertEquals(Medusa.Config:getDoctrine(nil).Readiness, R.ENGAGED)
+	lu.assertEquals(Medusa.Config:getDoctrine({ Posture = "WARM_WAR" }).Readiness, R.ALERTED)
+	lu.assertEquals(Medusa.Config:getDoctrine({ Posture = "COLD_WAR" }).Readiness, R.SURPRISED)
+	lu.assertEquals(Medusa.Config:getDoctrine({ Posture = "HOT_WAR", Readiness = "SURPRISED" }).Readiness, R.SURPRISED)
+	lu.assertEquals(Medusa.Config:getDoctrine({ Posture = "COLD_WAR", Readiness = "Sleepy" }).Readiness, R.SURPRISED)
+end
+
+function TestGetDoctrine:test_crew_factors_on_and_training_mode_off_by_default()
+	Medusa.Config:initialize()
+	local d = Medusa.Config:getDoctrine(nil)
+	lu.assertTrue(d.CrewFactors)
+	lu.assertFalse(d.TrainingMode)
+	local set = Medusa.Config:getDoctrine({ CrewFactors = false, TrainingMode = true })
+	lu.assertFalse(set.CrewFactors)
+	lu.assertTrue(set.TrainingMode)
+end
+
+function TestDoctrineScanRates:test_unknown_scan_rate_and_esm_keys_are_reported()
+	withTrackMemory(30)
+	local d = Medusa.Entities.Doctrine.new({
+		ScanUpdateRateSec = { EWR = 8, SAM_TRAK = 1 },
+		ESM = { MaxRangeKm = 200, BearingSigma = 3 },
+	})
+	lu.assertEquals(d.ScanRates.EWR, 8)
+	lu.assertEquals(d.ScanRates.SAM_TRACK, 2) -- the misspelt key is ignored
+	lu.assertEquals(d.ESM.MaxRangeKm, 200)
+	lu.assertEquals(d.ESM.BearingSigmaDeg, Medusa.Constants.Esm.DEFAULT_BEARING_SIGMA_DEG)
+	lu.assertEquals(#self.errors, 2)
+	local all = self.errors[1] .. self.errors[2]
+	lu.assertStrContains(all, "ScanUpdateRateSec.SAM_TRAK")
+	lu.assertStrContains(all, "ESM.BearingSigma")
+end
+
+function TestDoctrineScanRates:test_fire_discipline_without_engage_air_weapons_management_is_reported()
+	withTrackMemory(30)
+	Medusa.Entities.Doctrine.new({ ManageEngageAirWeapons = false })
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "DecoyFireDiscipline")
+	Medusa.Entities.Doctrine.new({ ManageEngageAirWeapons = false, DecoyFireDiscipline = false })
+	Medusa.Entities.Doctrine.new({})
+	lu.assertEquals(#self.errors, 1)
+end

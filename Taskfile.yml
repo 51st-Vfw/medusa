@@ -3,10 +3,11 @@
 version: "3"
 
 vars:
-  PROJECT_NAME: Medusa
+  PROJECT_NAME: Medusa IADS - Black Knight Edition (BKE)
   DCS_HARNESS_VERSION: 1.0.1
-  ARTIFACT_NAME: medusa-thin.lua
-  BUNDLED_ARTIFACT_NAME: medusa.lua
+  ARTIFACT_NAME: medusa-bke-thin.lua
+  BUNDLED_ARTIFACT_NAME: medusa-bke.lua
+  RELEASE_BRANCH: black-knight-edition
   BUILD_DIR: ./dist
   SCRIPT_DIR: ./scripts
   SOURCE_DIR: ./src
@@ -312,7 +313,7 @@ tasks:
     desc: "Delete current version tag locally and remotely, then re-tag HEAD"
     vars:
       TAG:
-        sh: '{{.PYTHON_BIN}} -c "import re; from pathlib import Path; v=re.search(r''version\s*=\s*\"([\d.]+)\"'', Path(''pyproject.toml'').read_text()).group(1); print(f''v{v}'')"'
+        sh: '{{.PYTHON_BIN}} -c "import re; from pathlib import Path; v=re.search(r''version\s*=\s*\"([\d.]+)\"'', Path(''pyproject.toml'').read_text()).group(1); print(f''BKEv{v}'')"'
     cmds:
       - cmd: "git tag -d {{.TAG}}"
         ignore_error: true
@@ -329,8 +330,8 @@ tasks:
         - name: PART
           enum: [major, minor, patch]
     preconditions:
-      - sh: '[ "$(git branch --show-current)" = "main" ]'
-        msg: "Releases must run from main"
+      - sh: '[ "$(git branch --show-current)" = "{{.RELEASE_BRANCH}}" ]'
+        msg: "Releases must run from {{.RELEASE_BRANCH}}"
       - sh: '[ -z "$(git status --porcelain --untracked-files=all)" ]'
         msg: "The working tree must be clean before a release"
       - sh: git remote get-url origin
@@ -359,5 +360,5 @@ tasks:
           echo "Would verify the bumped source"
           echo "Would commit: Release v$NEXT"
           echo "Would tag: v$NEXT"
-          echo "Would atomically push main and v$NEXT to origin"
+          echo "Would atomically push {{.RELEASE_BRANCH}} and v$NEXT to origin"
         platforms: [linux, darwin]

@@ -192,3 +192,37 @@ function TestGroupNameParser:test_prefix_no_match_when_alphanumeric_follows()
 	local r = Medusa.Services.GroupNameParser:parse("RSAMBO", "RSAM")
 	lu.assertFalse(r.isManaged)
 end
+
+function TestGroupNameParser:test_observer_token_is_a_role_with_label_after_it()
+	local r = Medusa.Services.GroupNameParser:parse("iads.1bn.obs.hill1", "iads")
+	lu.assertTrue(r.isManaged)
+	lu.assertEquals(r.roles[1], Medusa.Constants.Role.OBSERVER)
+	lu.assertEquals(r.unitLabel, "hill1")
+	lu.assertEquals(table.concat(r.echelonPath, ","), "1bn")
+	lu.assertNil(r.sensorType)
+	lu.assertFalse(r.isHQ)
+end
+
+function TestGroupNameParser:test_observer_long_alias_and_prefix_style_match()
+	lu.assertEquals(Medusa.Services.GroupNameParser:parse("iads.observer.post2", "iads").roles[1], "OBSERVER")
+	lu.assertEquals(Medusa.Services.GroupNameParser:parse("iads.2bn.OBS North", "iads").roles[1], "OBSERVER")
+	-- A word that only starts with the letters is not the token.
+	lu.assertEquals(#Medusa.Services.GroupNameParser:parse("iads.2bn.obsidian", "iads").roles, 0)
+end
+
+function TestGroupNameParser:test_observer_token_respects_config_override()
+	MEDUSA_CONFIG = {
+		Roles = { OBSERVER = "op" },
+		Networks = {
+			{ name = "T", coalition = (coalition and coalition.side and coalition.side.RED) or 1, prefix = "net" },
+		},
+	}
+	Medusa.Config.Current = nil
+	Medusa.Config:initialize()
+	local r = Medusa.Services.GroupNameParser:parse("net.1bn.op.ridge", "net")
+	lu.assertEquals(r.roles[1], Medusa.Constants.Role.OBSERVER)
+	lu.assertEquals(r.unitLabel, "ridge")
+	MEDUSA_CONFIG = nil
+	Medusa.Config.Current = nil
+	Medusa.Config:initialize()
+end

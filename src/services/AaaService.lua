@@ -40,6 +40,11 @@ local DETECTION_SOURCE = {
 	VISUAL = "VISUAL",
 }
 local PRIMARY_PROFILES = { CrewPerceptionService.PRIMARY_PROFILE }
+-- A crew told where to look (a local radar's contact or an observer report nearby) scans all round at full range.
+local CUED_PROFILES = {
+	CrewPerceptionService.PRIMARY_PROFILE,
+	{ RangeM = C.LocalAircraftDetection.PRIMARY_RANGE_M, CosHalfAngle = -1 },
+}
 local BARRAGE_STATES = {
 	[ARS.BARRAGE_FIRE] = true,
 	[ARS.BARRAGE_PAUSE] = true,
@@ -153,6 +158,19 @@ local function currentMode(battery)
 		return AM.RADAR_DIRECTED
 	end
 	return AM.INDEPENDENT
+end
+
+--- A local warning for an independent gun crew (a local cueing radar's contact or an observer report nearby): until
+--- untilTime the crew scans all round at full visual range and is twice as likely to place a sound. Radar-directed
+--- guns are directed by their radar and ignore it. Returns true when the crew was cued.
+function Medusa.Services.AaaService.cue(battery, untilTime)
+	if not battery.Aaa or not Battery.isIndependentAaa(battery) then
+		return false
+	end
+	if not battery.Aaa.CuedUntil or battery.Aaa.CuedUntil < untilTime then
+		battery.Aaa.CuedUntil = untilTime
+	end
+	return true
 end
 
 function Medusa.Services.AaaService.initializeMode(battery)
@@ -298,10 +316,12 @@ end
 
 local function tryDetection(ctx, search, battery, audioRangeM)
 	local aaa = battery.Aaa
+	local cued = aaa.CuedUntil ~= nil and ctx.now < aaa.CuedUntil
+	local profiles = cued and CUED_PROFILES or PRIMARY_PROFILES
 	local candidates = collectCandidates(search, battery, ctx.now)
 	for i = 1, #candidates do
 		local target = candidates[i]
-		if CrewPerceptionService.canSee(battery.Position, target.Position, aaa, PRIMARY_PROFILES) then
+		if CrewPerceptionService.canSee(battery.Position, target.Position, aaa, profiles) then
 			alert(battery, target, DETECTION_SOURCE.VISUAL, ctx.now)
 			return true
 		end
@@ -313,6 +333,9 @@ local function tryDetection(ctx, search, battery, audioRangeM)
 	end
 	aaa.LastAudioAttemptTime = ctx.now
 	local chance = AC.AUDIO_DETECTION_CHANCE * (POSTURE_CHANCE_MULTIPLIER[ctx.posture] or 1)
+	if cued then
+		chance = math.min(1, 2 * chance)
+	end
 	for i = 1, #candidates do
 		local target = candidates[i]
 		if CrewPerceptionService.hears(battery.Position, target.Position, audioRangeM) then

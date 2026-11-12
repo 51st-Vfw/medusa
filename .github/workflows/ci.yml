@@ -1,9 +1,9 @@
-name: Medusa CI
+name: Medusa BKE CI
 
 on:
   push:
     branches:
-      - main
+      - black-knight-edition
     paths:
       - "**/*.lua"
       - "**/*.py"
@@ -17,7 +17,7 @@ on:
       - "uv.lock"
   pull_request:
     branches:
-      - main
+      - black-knight-edition
       - release/*
     paths:
       - "**/*.lua"
@@ -40,8 +40,8 @@ concurrency:
 
 env:
   LUA_VERSION: 5.1
-  ARTIFACT_NAME: medusa-thin.lua
-  BUNDLED_ARTIFACT_NAME: medusa.lua
+  ARTIFACT_NAME: medusa-bke-thin.lua
+  BUNDLED_ARTIFACT_NAME: medusa-bke.lua
   ARTIFACT_DIR: dist
   ARTIFACT_NAME_SHA: ci-artifact.lua
 
@@ -103,6 +103,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
         run: |
+          # A newly pushed branch has an all-zero "before" SHA; compare against nothing then.
+          case "$BASE_SHA" in 0000000000000000000000000000000000000000) BASE_SHA="" ;; esac
           task complexity:check -- \
             --base-ref "$BASE_SHA" \
             --github-annotations \
@@ -124,14 +126,14 @@ jobs:
       - name: Verify version stamped
         id: version-stamp-check
         run: |
-          if grep -q '{{VERSION}}' '${{ env.ARTIFACT_DIR }}/${{ env.ARTIFACT_NAME }}'; then
-            echo "::error::{{VERSION}} placeholder found in ${{ env.ARTIFACT_NAME }}"
-            exit 1
-          fi
-          if grep -q '{{VERSION}}' '${{ env.ARTIFACT_DIR }}/${{ env.BUNDLED_ARTIFACT_NAME }}'; then
-            echo "::error::{{VERSION}} placeholder found in ${{ env.BUNDLED_ARTIFACT_NAME }}"
-            exit 1
-          fi
+          for placeholder in '{{VERSION}}' '{{MEDUSA_BASE}}'; do
+            for artifact in '${{ env.ARTIFACT_NAME }}' '${{ env.BUNDLED_ARTIFACT_NAME }}'; do
+              if grep -qF "$placeholder" "${{ env.ARTIFACT_DIR }}/$artifact"; then
+                echo "::error::$placeholder placeholder found in $artifact"
+                exit 1
+              fi
+            done
+          done
 
       - name: Lint thin
         id: lint-thin
@@ -183,8 +185,8 @@ jobs:
           SHORT_SHA="${GITHUB_SHA::7}"
           echo "SAFE_REF_NAME=${SAFE_REF_NAME}" >> "$GITHUB_ENV"
           echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
-          echo "ARTIFACT_NAME_SHA=medusa-thin.lua-${SAFE_REF_NAME}-${GITHUB_RUN_ID}-${SHORT_SHA}" >> "$GITHUB_ENV"
-          echo "BUNDLED_ARTIFACT_NAME_SHA=medusa.lua-${SAFE_REF_NAME}-${GITHUB_RUN_ID}-${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME_SHA=medusa-bke-thin.lua-${SAFE_REF_NAME}-${GITHUB_RUN_ID}-${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "BUNDLED_ARTIFACT_NAME_SHA=medusa-bke.lua-${SAFE_REF_NAME}-${GITHUB_RUN_ID}-${SHORT_SHA}" >> "$GITHUB_ENV"
 
       - name: Rename build artifacts with SHA
         id: rename

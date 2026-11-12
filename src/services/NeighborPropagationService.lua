@@ -1,5 +1,6 @@
 require("_header")
 require("services.Services")
+require("core.Chance")
 
 Medusa.Services.NeighborPropagationService = {}
 
@@ -43,7 +44,8 @@ function Medusa.Services.NeighborPropagationService.scheduleDelivery(delivery)
 	end
 	local delay = delivery.delayMinSec
 	if delivery.delayMaxSec > delivery.delayMinSec then
-		delay = delivery.delayMinSec + math.random() * (delivery.delayMaxSec - delivery.delayMinSec)
+		-- delivery.training (MANPAD wakes of a training network only): the middle of the window.
+		delay = Medusa.Chance.uniform(delivery.training == true, delivery.delayMinSec, delivery.delayMaxSec)
 	end
 	local recipientId = delivery.recipient.BatteryId
 	local timerId

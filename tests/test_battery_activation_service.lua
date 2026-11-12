@@ -50,6 +50,24 @@ function TestGoHot:setUp()
 	end
 end
 
+function TestGoHot:test_a_reasoned_wake_is_a_debrief_line_naming_its_track()
+	local lines = {}
+	local originalInfo = Medusa.Logger.info
+	Medusa.Logger.info = function(_, msg)
+		lines[#lines + 1] = msg
+	end
+	local battery = makeBattery("sa6-1")
+	battery.NetworkId = "red"
+	Medusa.Services.BatteryActivationService.goHot(battery, 100, "assigned", { DisplayTrackId = "EW-0007" })
+	local other = makeBattery("sa6-2")
+	other.NetworkId = "red"
+	Medusa.Services.BatteryActivationService.goHot(other, 100, "manpad_engages")
+	Medusa.Logger.info = originalInfo
+	local text = table.concat(lines, "~") .. "~"
+	lu.assertStrContains(text, "|net=red|ev=WAKE|battery=sa6-1|from=INITIALIZING|to=HOT|reason=assigned|track=EW-0007")
+	lu.assertStrContains(text, "|ev=WAKE|battery=sa6-2|from=INITIALIZING|to=HOT|reason=manpad_engages~")
+end
+
 function TestGoHot:test_returnsTrueOnSuccess()
 	local battery = makeBattery("sa6-1")
 	local result = Medusa.Services.BatteryActivationService.goHot(battery, 100)

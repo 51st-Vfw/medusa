@@ -1,7 +1,14 @@
 name: Bug Report
-description: Something isn't working right
+description: Something isn't working right in Medusa IADS - Black Knight Edition (BKE)
 labels: ["bug"]
 body:
+    - type: markdown
+      attributes:
+          value: |
+              This tracker is for Medusa IADS - Black Knight Edition (BKE), the customised Medusa build of the 667th Black Knights and the 51st VFW.
+              If the problem also happens with official Medusa IADS, please report it upstream at https://github.com/medusa-iads/medusa/issues instead.
+              51st VFW and 667th members can also raise BKE problems with Blackdog of the 667th.
+
     - type: textarea
       id: what-happened
       attributes:
@@ -13,8 +20,9 @@ body:
     - type: input
       id: medusa-version
       attributes:
-          label: Medusa version
-          placeholder: "1.0.0"
+          label: Medusa BKE version
+          description: The first Medusa line in dcs.log names it, e.g. "Medusa IADS - Black Knight Edition (BKE) v0.0.1 (based on Medusa v1.6.0)".
+          placeholder: "0.0.1"
       validations:
           required: true
 

@@ -1,7 +1,8 @@
 {
   "src_dir": "src",
   "dist_dir": "dist",
-  "output": "medusa-thin.lua",
+  "output": "medusa-bke-thin.lua",
+  "bundled_output": "medusa-bke.lua",
   "prepend": ["src/_header.lua"],
   "module_roots": ["src"],
   "strip_requires": true,

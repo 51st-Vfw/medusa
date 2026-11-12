@@ -4,6 +4,7 @@ require("services.SpatialQuery")
 require("entities.Track")
 require("core.Constants")
 require("core.Logger")
+require("core.Chance")
 
 --[[
             ████████╗██████╗  █████╗  ██████╗██╗  ██╗     ██████╗██╗      █████╗ ███████╗███████╗██╗███████╗██╗███████╗██████╗
@@ -82,15 +83,20 @@ local BORDER_HOSTILE_DWELL = {
 Medusa.Services.TrackClassifier._zoneCheckCache = {}
 local _zoneCheckCache = Medusa.Services.TrackClassifier._zoneCheckCache
 
+-- Training mode (doctrine TrainingMode) of the network whose track is being classified: timers at their midpoint.
+-- Its operators' load stretches every identification timer (ctx.idDwellFactor, crew factors; 1 otherwise).
+local trainingNow = false
+local dwellFactorNow = 1
+
 local function randomInRange(range)
 	if not range then
 		return 0
 	end
 	local lo, hi = range[1], range[2]
 	if lo >= hi then
-		return lo
+		return lo * dwellFactorNow
 	end
-	return lo + math.random() * (hi - lo)
+	return Medusa.Chance.uniform(trainingNow, lo, hi) * dwellFactorNow
 end
 
 local function isRWRIlluminated(track)
@@ -480,6 +486,8 @@ function Medusa.Services.TrackClassifier.classifyTrack(track, ctx)
 	local posture = doctrine and doctrine.Posture or P.HOT_WAR
 	local hasBorders = ctx.borderPolygons and #ctx.borderPolygons > 0
 	local guiltEnabled = not doctrine or doctrine.GuiltByAssociation ~= false
+	trainingNow = Medusa.Chance.isTraining(doctrine)
+	dwellFactorNow = ctx.idDwellFactor or 1
 
 	local prevId = track.TrackIdentification
 

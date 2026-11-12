@@ -11,8 +11,8 @@ from pathlib import Path
 
 
 RELEASE_ARCHIVES = {
-    "medusa.zip": ("medusa.lua", "medusa-{version}.lua"),
-    "medusa-thin.zip": ("medusa-thin.lua", "medusa-thin-{version}.lua"),
+    "medusa-bke.zip": ("medusa-bke.lua", "medusa-bke-{version}.lua"),
+    "medusa-bke-thin.zip": ("medusa-bke-thin.lua", "medusa-bke-thin-{version}.lua"),
 }
 VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
 
@@ -36,6 +36,12 @@ def prepare_release(build_dir: Path, release_dir: Path, version: str) -> list[st
     try:
         release_names = []
         checksum_lines = []
+        # [BKE] The bare .lua artifacts are release assets too, listed in SHA256SUMS.txt.
+        for source_name, source_path in sources.items():
+            shutil.copyfile(source_path, staging_dir / source_name)
+            digest = hashlib.sha256((staging_dir / source_name).read_bytes()).hexdigest()
+            release_names.append(source_name)
+            checksum_lines.append(f"{digest}  {source_name}")
         for archive_name, (source_name, member_template) in RELEASE_ARCHIVES.items():
             archive_path = staging_dir / archive_name
             member_name = member_template.format(version=version)

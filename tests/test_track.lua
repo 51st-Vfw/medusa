@@ -361,3 +361,121 @@ function TestManeuverState:test_orbiting_for_reversed_heading()
 
 	lu.assertEquals(track.ManeuverState, "ORBITING")
 end
+
+-- == Contact evidence on the track ==
+
+TestTrackEvidence = {}
+
+local CE = Medusa.Constants.ContactEvidence
+local SeenAs = Medusa.Constants.SeenAs
+
+local function look(track, db, var, seen, now)
+	Medusa.Entities.Track.observeEvidence(track, { SizeDb = db, SizeVarDb = var, SeenAs = seen }, now or 0)
+end
+
+function TestTrackEvidence:test_new_track_has_no_size_estimate()
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	lu.assertNil(track.SizeDb)
+	lu.assertNil(Medusa.Entities.Track.sizeClass(track))
+end
+
+function TestTrackEvidence:test_looks_fuse_by_inverse_variance()
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	look(track, 0, 1)
+	look(track, 10, 4)
+	lu.assertAlmostEquals(track.SizeDb, 2, 1e-9)
+	lu.assertAlmostEquals(track.SizeWeight, 1.25, 1e-9)
+end
+
+function TestTrackEvidence:test_spread_adds_the_unknown_shape_to_the_looks_own_noise()
+	local F = CE.SIZE_SPREAD_FLOOR_DB
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	look(track, 6, 9)
+	lu.assertAlmostEquals(track.SizeSpreadDb, math.sqrt(9 + F * F), 1e-9)
+	for _ = 1, 50 do
+		look(track, 6, 9)
+	end
+	lu.assertAlmostEquals(track.SizeSpreadDb, math.sqrt(1 / CE.SIZE_MAX_WEIGHT + F * F), 1e-9)
+	lu.assertTrue(track.SizeSpreadDb > F)
+end
+
+function TestTrackEvidence:test_a_few_looks_are_needed_before_any_size_call()
+	-- One look far below the split is still no call: a look's noise must first average down to the shape floor.
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	look(track, -25, 9)
+	lu.assertNil(Medusa.Entities.Track.sizeClass(track))
+	look(track, -25, 9)
+	look(track, -25, 9)
+	lu.assertEquals(Medusa.Entities.Track.sizeClass(track), "small")
+end
+
+function TestTrackEvidence:test_memory_fades_so_a_changed_return_shows()
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	for _ = 1, 200 do
+		look(track, 0, 4)
+	end
+	for _ = 1, 40 do
+		look(track, 10, 4)
+	end
+	lu.assertTrue(track.SizeDb > 5)
+end
+
+function TestTrackEvidence:test_report_without_size_leaves_the_estimate()
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	look(track, 3, 4)
+	Medusa.Entities.Track.observeEvidence(track, {}, 1)
+	lu.assertEquals(track.SizeDb, 3)
+end
+
+function TestTrackEvidence:test_arm_sized_looks_read_small_and_jet_sized_looks_read_large()
+	local arm = Medusa.Entities.Track.new(makeTrackData())
+	local jet = Medusa.Entities.Track.new(makeTrackData())
+	-- Returns 5.5 dB either side of the split: one 3 dB look is not yet confident, five are.
+	look(arm, -9, 9)
+	look(jet, 2, 9)
+	lu.assertNil(Medusa.Entities.Track.sizeClass(arm))
+	lu.assertNil(Medusa.Entities.Track.sizeClass(jet))
+	for _ = 1, 4 do
+		look(arm, -9, 9)
+		look(jet, 2, 9)
+	end
+	lu.assertEquals(Medusa.Entities.Track.sizeClass(arm), "small")
+	lu.assertEquals(Medusa.Entities.Track.sizeClass(jet), "large")
+end
+
+function TestTrackEvidence:test_beam_on_arm_with_the_largest_shape_offset_never_reads_large()
+	-- 0.08 m2 (-11 dBsm) + 7 dB beam + 3 dB shape: -1 dBsm, looked at for as long as you like.
+	local arm = Medusa.Entities.Track.new(makeTrackData())
+	for _ = 1, 100 do
+		look(arm, -1, 6.25)
+	end
+	lu.assertNil(Medusa.Entities.Track.sizeClass(arm))
+end
+
+function TestTrackEvidence:test_small_fighter_nose_on_with_the_smallest_offset_never_reads_small()
+	-- 2 m2 (+3 dBsm) - 3 dB shape, nose-on: 0 dBsm.
+	local jet = Medusa.Entities.Track.new(makeTrackData())
+	for _ = 1, 100 do
+		look(jet, 0, 6.25)
+	end
+	lu.assertNotEquals(Medusa.Entities.Track.sizeClass(jet), "small")
+end
+
+function TestTrackEvidence:test_seen_as_is_kept_with_its_time()
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	look(track, nil, nil, SeenAs.AIRCRAFT, 50)
+	lu.assertEquals(track.SeenAs, SeenAs.AIRCRAFT)
+	lu.assertEquals(track.SeenAsTime, 50)
+	look(track, nil, nil, nil, 60)
+	lu.assertEquals(track.SeenAs, SeenAs.AIRCRAFT)
+	lu.assertEquals(track.SeenAsTime, 50)
+end
+
+function TestTrackEvidence:test_latest_sighting_replaces_an_earlier_one()
+	local track = Medusa.Entities.Track.new(makeTrackData())
+	look(track, nil, nil, SeenAs.MUNITION, 55)
+	lu.assertEquals(track.SeenAs, SeenAs.MUNITION)
+	look(track, nil, nil, SeenAs.AIRCRAFT, 60)
+	lu.assertEquals(track.SeenAs, SeenAs.AIRCRAFT)
+	lu.assertEquals(track.SeenAsTime, 60)
+end

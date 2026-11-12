@@ -446,6 +446,23 @@ function TestCrewSuppressionService:test_recovery_stays_cold_without_restoring_a
 	lu.assertEquals(battery.Aaa.ResponseState, C.Aaa.ResponseState.IDLE)
 end
 
+function TestCrewSuppressionService:test_recovery_notifies_the_network()
+	local battery = makeBattery(C.BatteryRole.AAA)
+	local ctx = makeContext(self, battery)
+	local recovered = {}
+	ctx.onRecovered = function(b)
+		recovered[#recovered + 1] = b
+	end
+	CrewSuppressionService.apply(ctx, battery, C.CrewSuppressionCause.DAMAGE, 120)
+	lu.assertEquals(#recovered, 0)
+
+	self.now = 220
+	self.scheduled[1].callback()
+
+	lu.assertEquals(#recovered, 1)
+	lu.assertIs(recovered[1], battery)
+end
+
 function TestCrewSuppressionService:test_manpad_pending_wake_is_cancelled_and_recovers_alert()
 	local battery = makeBattery(C.BatteryRole.MANPAD)
 	local ctx = makeContext(self, battery)

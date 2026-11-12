@@ -5,10 +5,17 @@ from datetime import date
 from pathlib import Path
 
 
-MAIN_BRANCH = "main"
+# [BKE] Releases are tagged on the production branch; the fork's main stays stock Medusa.
+RELEASE_BRANCH = "black-knight-edition"
 ORIGIN_REMOTE = "origin"
 PROJECT_FILE = Path("pyproject.toml")
 CHANGELOG_FILE = Path("CHANGELOG.md")
+# [BKE] Tags are BKEv<version> so they can never be mistaken for stock Medusa tags (v<version>).
+TAG_PREFIX = "BKEv"
+
+
+def release_tag(version: str) -> str:
+    return f"{TAG_PREFIX}{version}"
 
 
 def read_version(pyproject_path: Path) -> str:
@@ -34,30 +41,30 @@ def read_head_version() -> str:
     return m.group(1)
 
 
-def require_clean_main() -> None:
+def require_clean_release_branch() -> None:
     status = subprocess.check_output(
         ["git", "status", "--porcelain", "--untracked-files=all"], text=True
     ).strip()
     if status:
         raise SystemExit("working tree must be clean before tagging")
     branch = current_branch()
-    if branch != MAIN_BRANCH:
-        raise SystemExit(f"release tags must be created from {MAIN_BRANCH}, not {branch}")
+    if branch != RELEASE_BRANCH:
+        raise SystemExit(f"release tags must be created from {RELEASE_BRANCH}, not {branch}")
 
 
 def build_tag_message(version: str, changelog_path: Path) -> str:
     if not changelog_path.exists():
-        return f"Release v{version}"
+        return f"Release {release_tag(version)}"
     content = changelog_path.read_text(encoding="utf-8")
     pat = re.compile(rf"(?ms)^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)")
     m = pat.search(content)
     if not m:
-        return f"Release v{version}"
+        return f"Release {release_tag(version)}"
     body = m.group(1).strip()
     if not body:
-        return f"Release v{version}"
+        return f"Release {release_tag(version)}"
     today = date.today().isoformat()
-    return f"v{version} - {today}\n\n{body}"
+    return f"{release_tag(version)} - {today}\n\n{body}"
 
 
 def run(cmd: list[str]) -> None:
@@ -65,18 +72,18 @@ def run(cmd: list[str]) -> None:
 
 
 def main() -> None:
-    require_clean_main()
+    require_clean_release_branch()
     version = read_version(PROJECT_FILE)
     head_version = read_head_version()
     if version != head_version:
         raise SystemExit(
             f"working tree version ({version}) does not match HEAD version ({head_version})"
         )
-    tag = f"v{version}"
+    tag = release_tag(version)
     message = build_tag_message(version, CHANGELOG_FILE)
     run(["git", "tag", "-a", tag, "-m", message])
     try:
-        run(["git", "push", "--atomic", ORIGIN_REMOTE, MAIN_BRANCH, tag])
+        run(["git", "push", "--atomic", ORIGIN_REMOTE, RELEASE_BRANCH, tag])
     except subprocess.CalledProcessError:
         subprocess.run(
             ["git", "tag", "-d", tag],
@@ -86,7 +93,7 @@ def main() -> None:
         )
         raise
 
-    print(f"Tagged HEAD with {tag} and atomically pushed {MAIN_BRANCH} and {tag}")
+    print(f"Tagged HEAD with {tag} and atomically pushed {RELEASE_BRANCH} and {tag}")
 
 
 if __name__ == "__main__":

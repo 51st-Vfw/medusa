@@ -4,8 +4,10 @@ require("core.Logger")
 require("entities.Battery")
 require("entities.SensorUnit")
 require("entities.C2Node")
+require("entities.ObserverPost")
 require("services.ManpadService")
 require("services.AaaService")
+require("core.Chance")
 
 --[[
             ███████╗███╗   ██╗████████╗██╗████████╗██╗   ██╗    ███████╗ █████╗  ██████╗████████╗ ██████╗ ██████╗ ██╗   ██╗
@@ -19,6 +21,12 @@ require("services.AaaService")
     - Converts discovered group DTOs into Battery, SensorUnit, or C2Node entities.
     - Classifies individual unit roles (launcher, search radar, track radar, TELAR, TLAR) from DCS attributes.
     - Reads ammo data, weapon ranges, and HARM-capable system counts during battery creation.
+    - Defers a launcher-less group of a search radar and guns (fewer than two guns per radar) until its radar's reach
+      is known (doctrine LocalCueingRadars): a short-reach radar makes it an AAA battery with its own search radar, a
+      long-reach one an early-warning radar with unmanaged guns.
+    - Creates an observer post for a group named with the observer role token that is nothing else.
+    - Creates a listening station (an observer post marked Esm) for a group named with the esm/elint token that is
+      nothing else; with the observer token too, it is both.
 
     How others use it
     - IadsNetwork's discovery listener calls createFromDTO to populate the battery, sensor, and C2 stores.
@@ -286,7 +294,7 @@ function Medusa.Services.EntityFactory.extractAmmo(unitName, batteryRole)
 	return ammoTypes, totalCount
 end
 
-local function createSensors(dto, stores, networkId, units, inventory)
+local function createSensors(dto, stores, networkId, units, inventory, named)
 	if #units == 0 then
 		logger:error(string.format("no units in sensor group '%s'", dto.groupName))
 		return "sensor", 0
@@ -338,6 +346,7 @@ local function createSensors(dto, stores, networkId, units, inventory)
 				Position = position,
 				HierarchyPath = hierarchyPath,
 				IsAirborne = isAwacs or dto.category == Group.Category.AIRPLANE,
+				NamedRole = named == true,
 			})
 			stores.sensors:add(sensor)
 			count = count + 1
@@ -402,6 +411,7 @@ local function createBatteryUnit(unit, unitId, batteryRole, roles, position, con
 		InitialDamagePending = initiallyDamaged,
 		Position = position,
 		CrewSkill = crewSkill or context.defaultCrewSkill,
+		CrewSkillDefaulted = crewSkill == nil,
 	})
 	logger:debug(
 		string.format("[%s] roles=%s, ammo=%d", unitTypeName or "unknown", table.concat(roles, ","), ammoCount)
@@ -758,7 +768,10 @@ local function createManpad(dto, stores, networkId, units, inventory, context)
 			WakeReason = Medusa.Constants.Manpad.WakeReason.NONE,
 			AlertCycleCount = 0,
 			LastAlertedTime = nil,
-			AudioCueRangeM = Medusa.Services.ManpadService.sampleAudioCueRange(audioRangeM),
+			AudioCueRangeM = Medusa.Services.ManpadService.sampleAudioCueRange(
+				audioRangeM,
+				Medusa.Chance.isTraining(context.doctrine)
+			),
 			AlertStartTime = nil,
 			HotUntil = nil,
 			CooldownUntil = nil,
@@ -789,6 +802,53 @@ local function createManpad(dto, stores, networkId, units, inventory, context)
 	return "manpad", 1
 end
 
+--- A launcher-less group whose guns outnumber its MANPADs but are fewer than two per search radar: an
+--- early-warning radar with unmanaged guns, or with a short-reach radar an AAA battery directed by that radar.
+local function isRadarWithGuns(inventory)
+	return inventory.launcherCount == 0
+		and inventory.searchRadarCount > 0
+		and inventory.aaaCount > inventory.manpadCount
+		and inventory.aaaCount < 2 * inventory.searchRadarCount
+end
+
+--- Type names of the group's search radars, each with a unit position (where to probe its reach before a deferred
+--- group is created).
+local function searchRadarTypes(units, inventory)
+	local types = {}
+	for i = 1, #units do
+		if hasRole(inventory.rolesByIndex[i], BUR.SEARCH_RADAR) then
+			local name = getUnitName(units[i])
+			local typeName = name and GetUnitType(name) or nil
+			local position = cachedUnitPosition(units, inventory, i)
+			if typeName and position then
+				types[typeName] = position
+			end
+		end
+	end
+	return types
+end
+
+local function createObserverPost(dto, stores, networkId, units, inventory)
+	local names = {}
+	for i = 1, #units do
+		names[#names + 1] = getUnitName(units[i])
+	end
+	local position = units[1] and cachedUnitPosition(units, inventory, 1) or nil
+	stores.observers:add(Medusa.Entities.ObserverPost.new({
+		NetworkId = networkId,
+		GroupId = dto.groupId,
+		GroupName = dto.groupName,
+		UnitNames = names,
+		Position = position,
+		HierarchyPath = dto.parsed.echelonPath and table.concat(dto.parsed.echelonPath, ".") or nil,
+		Watch = hasNamedRole(dto, Role.OBSERVER),
+		Esm = hasNamedRole(dto, Role.ESM),
+	}))
+	local what = hasNamedRole(dto, Role.ESM) and "listening station" or "observer post"
+	logger:info(string.format("%s %s: %d crew units", what, dto.groupName, #names))
+	return "observer", 1
+end
+
 function Medusa.Services.EntityFactory.createFromDTO(dto, stores, networkId, harmSystems, doctrine, crewSkillIndex)
 	local units = GetGroupUnits(dto.groupName) or {}
 	local inventory = inspectInventory(units)
@@ -804,7 +864,7 @@ function Medusa.Services.EntityFactory.createFromDTO(dto, stores, networkId, har
 	local autoDiscoverEwrs = not doctrine or doctrine.AutoDiscoverEwrs ~= false
 
 	if namedAwacs then
-		return createSensors(dto, stores, networkId, units, inventory)
+		return createSensors(dto, stores, networkId, units, inventory, true)
 	end
 	if dto.parsed.isHQ and not namedSensor then
 		createHQ(dto, stores, networkId, units, inventory)
@@ -828,11 +888,24 @@ function Medusa.Services.EntityFactory.createFromDTO(dto, stores, networkId, har
 	then
 		return createBattery(dto, stores, networkId, harmSystems, units, inventory, BR.AAA, context)
 	end
+	if not namedSensor and isRadarWithGuns(inventory) and doctrine and doctrine.LocalCueingRadars ~= false then
+		local reach = dto.localRadarReachM
+		if reach == nil then
+			return "deferred", searchRadarTypes(units, inventory)
+		end
+		if reach and reach < Medusa.Constants.LocalRadar.MAX_REACH_M then
+			logger:info(string.format("group '%s': short-reach radar with guns, AAA with its own radar", dto.groupName))
+			return createBattery(dto, stores, networkId, harmSystems, units, inventory, BR.AAA, context)
+		end
+	end
 	if namedSensor or (inventory.searchRadarCount > 0 and autoDiscoverEwrs) then
 		if not namedSensor then
 			logger:info(string.format("auto-discovered EWR group '%s'", dto.groupName))
 		end
-		return createSensors(dto, stores, networkId, units, inventory)
+		return createSensors(dto, stores, networkId, units, inventory, namedSensor)
+	end
+	if (hasNamedRole(dto, Role.OBSERVER) or hasNamedRole(dto, Role.ESM)) and stores.observers then
+		return createObserverPost(dto, stores, networkId, units, inventory)
 	end
 	return createBattery(dto, stores, networkId, harmSystems, units, inventory, inventory.batteryRole, context)
 end

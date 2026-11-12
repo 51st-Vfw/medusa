@@ -2,6 +2,7 @@ require("_header")
 require("services.Services")
 require("services.PkModel")
 require("services.SpatialQuery")
+require("services.DecoyAssessmentService")
 require("entities.Battery")
 require("entities.Track")
 require("core.Constants")
@@ -64,20 +65,33 @@ local function resolveDoctrineFloor(doctrine)
 	return (doctrine and doctrine.EffectivePkFloor) or (doctrine and doctrine.PkFloor) or Medusa.Constants.PK_FLOOR
 end
 
+--- A suspected or probable decoy is worth half a missile's threat value (DecoyAssessmentService).
+function Medusa.Services.TargetAssigner._decoyFactor(track)
+	local label = Medusa.Services.DecoyAssessmentService.label(track)
+	return (label == "SUSPECT" or label == "PROBABLE") and 0.5 or 1
+end
+
+--- A PROBABLE decoy is never assigned to a long/medium-range SAM (a gliding one that threatens a battery is left to
+--- point defence).
+function Medusa.Services.TargetAssigner._decoyBarred(track, role)
+	return Medusa.Constants.Decoy.MANAGED_ROLES[role] == true
+		and Medusa.Services.DecoyAssessmentService.isProbable(track)
+end
+
 --- Scores a track's threat priority (0-100) based on aircraft type and speed.
 local function computeThreatValue(track, ctx)
 	local C = Medusa.Constants
 	local typeScore = C.AircraftTypeThreatScore[track.AssessedAircraftType] or 30
 	local vel = track.SmoothedVelocity or track.Velocity
 	if not vel then
-		return typeScore
+		return typeScore * Medusa.Services.TargetAssigner._decoyFactor(track)
 	end
 	local speed = VecLength2D(vel)
 	local threatSpeedScaling = (ctx and ctx.doctrine and ctx.doctrine.ThreatSpeedScaling) or 30
 	-- Speed as fraction of Mach 1, scaled to doctrine-configured point value.
 	-- Faster targets score higher threat; capped at Mach 1 to avoid outsized weighting.
 	local speedTerm = math.min(speed / C.SPEED_OF_SOUND_MPS, 1.0) * threatSpeedScaling
-	return math.min(typeScore + speedTerm, 100)
+	return math.min(typeScore + speedTerm, 100) * Medusa.Services.TargetAssigner._decoyFactor(track)
 end
 
 --- Returns true if a battery can receive a new target assignment.
@@ -285,7 +299,11 @@ local function buildCandidatePairs(tracks, ctx, minId)
 				ctx.maxRange
 			)
 			for j = 1, #batteries do
-				if trackAcceptsBattery(track, batteries[j].Role, ctx) then
+				local role = batteries[j].Role
+				if
+					trackAcceptsBattery(track, role, ctx)
+					and not Medusa.Services.TargetAssigner._decoyBarred(track, role)
+				then
 					n = tryAddPair(batteries[j], track, threatValue, n, ctx)
 				end
 			end
@@ -351,6 +369,7 @@ local function findBestTrackForBattery(battery, ctx)
 			and track.LifecycleState == LS.ACTIVE
 			and track.AssessedAircraftType ~= Medusa.Constants.AssessedAircraftType.HARM
 			and meetsMinIdentification(track.TrackIdentification, TI.BANDIT)
+			and not Medusa.Services.TargetAssigner._decoyBarred(track, battery.Role)
 		then
 			local projPos = projectTrackPosition(track, lookaheadSec)
 			if projPos then
@@ -459,6 +478,7 @@ local function _assignSeadPriority(tracks, ctx, minId, assignments)
 				if
 					isBatteryEligible(nearby[j])
 					and not _assigned[nearby[j].BatteryId]
+					and not Medusa.Services.TargetAssigner._decoyBarred(track, nearby[j].Role)
 					and (track.AssessedAircraftType ~= AAT.HARM or nearby[j].HarmCapableUnitCount > 0)
 				then
 					local projPos = projectTrackPosition(track, lookaheadSec)
@@ -758,6 +778,9 @@ function Medusa.Services.TargetAssigner.checkSingleDeactivation(battery, ctx)
 	local track = ctx.trackStore:get(battery.CurrentTargetTrackId)
 	if not track or track.LifecycleState == LS.EXPIRED then
 		return { battery = battery, reason = "track expired" }
+	end
+	if not battery.IsPointDefense and Medusa.Services.TargetAssigner._decoyBarred(track, battery.Role) then
+		return { battery = battery, reason = "target is a probable decoy" }
 	end
 	if track.LifecycleState == LS.STALE then
 		local protected = track.AssignmentTime and (ctx.now - track.AssignmentTime) < holdDownSec

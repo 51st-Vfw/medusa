@@ -115,6 +115,39 @@ function TestManpadAudioCueRange:test_zeroRandomDrawReturnsZeroRange()
 	lu.assertEquals(Medusa.Services.ManpadService.sampleAudioCueRange(), 0)
 end
 
+function TestManpadAudioCueRange:test_trainingModeHearsAtTheMiddleOfTheRange()
+	math.random = function()
+		return 0
+	end
+	lu.assertEquals(Medusa.Services.ManpadService.sampleAudioCueRange(6000, true), 3000)
+end
+
+function TestManpadAudioCueRange:test_trainingModeWakeDelayIsTheMidpoint()
+	require("services.NeighborPropagationService")
+	local savedSchedule = ScheduleOnce
+	local delay
+	ScheduleOnce = function(_, _, d)
+		delay = d
+		return 1
+	end
+	math.random = function()
+		return 0
+	end
+	local recipient = { BatteryId = "b", Manpad = {} }
+	Medusa.Services.NeighborPropagationService.scheduleDelivery({
+		recipient = recipient,
+		recipientStore = {},
+		recipientStateField = "Manpad",
+		pendingTimerField = "WakeTimerId",
+		delayMinSec = 30,
+		delayMaxSec = 300,
+		training = true,
+		onDelivery = function() end,
+	})
+	ScheduleOnce = savedSchedule
+	lu.assertEquals(delay, 165)
+end
+
 TestManpadFireReadiness = {}
 
 function TestManpadFireReadiness:test_requiresHotActivationOperationalStateAndAmmo()
@@ -735,4 +768,18 @@ function TestManpadNetworkLifecycle:test_lateCancelledCallback_doesNotOwnReplace
 	lu.assertEquals(bat.Manpad.SleepWakeState, "ALERTING")
 	lu.assertEquals(bat.Manpad.WakeReason, "IADS")
 	lu.assertEquals(bat.Manpad.WakeTimerId, second.id)
+end
+
+TestManpadSurprisedNetwork = {}
+
+function TestManpadSurprisedNetwork:test_sleeping_crews_of_a_surprised_network_do_not_watch_the_sky()
+	local P = Medusa.Constants.Posture
+	local MSWS = Medusa.Constants.Manpad.SleepWakeState
+	local MDM = Medusa.Constants.Manpad.DetectionMode
+	local M = Medusa.Services.ManpadService
+	lu.assertEquals(M.sleepPosture(P.HOT_WAR, true), P.WARM_WAR)
+	lu.assertEquals(M.sleepPosture(P.HOT_WAR, false), P.HOT_WAR)
+	lu.assertEquals(M.sleepPosture(P.COLD_WAR, true), P.COLD_WAR)
+	lu.assertEquals(M.detectionMode(MSWS.ASLEEP, M.sleepPosture(P.HOT_WAR, true), 0), MDM.NONE)
+	lu.assertEquals(M.detectionMode(MSWS.ALERT, M.sleepPosture(P.HOT_WAR, true), 0), MDM.FULL)
 end

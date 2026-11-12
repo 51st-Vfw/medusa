@@ -139,6 +139,24 @@ function TestTrackManagerProcessReport:test_classification_change_retains_displa
 	lu.assertEquals(track.DisplayTrackId, "AE0001")
 end
 
+function TestTrackManagerProcessReport:test_new_track_records_its_first_sighting()
+	local track = self.mgr:processReport(makeReport(), mockTime)
+
+	lu.assertEquals(track.PositionHistory:size(), 1)
+	local first = track.PositionHistory:get(1)
+	lu.assertEquals(first.timestamp, mockTime)
+	lu.assertEquals(first.position, { x = 1000, y = 500, z = 2000 })
+	lu.assertEquals(first.velocity, { x = 100, y = 0, z = 50 })
+end
+
+function TestTrackManagerProcessReport:test_second_sighting_gives_two_history_entries()
+	self.mgr:processReport(makeReport(), mockTime)
+	mockTime = mockTime + 5
+	local track = self.mgr:processReport(makeReport({ Position = { x = 1500, y = 500, z = 2250 } }), mockTime)
+
+	lu.assertEquals(track.PositionHistory:size(), 2)
+end
+
 function TestTrackManagerProcessReport:test_processReport_nilReport()
 	local result = self.mgr:processReport(nil)
 	lu.assertNil(result)
@@ -156,7 +174,9 @@ TestTrackManagerPruneStale = {}
 
 function TestTrackManagerPruneStale:setUp()
 	setupMocks()
-	self.mgr = Medusa.Services.TrackManager:new()
+	-- The re-association tests here pin the stock behaviour (doctrine EvidenceReacquisition off: the same DCS object
+	-- near its old position). Evidence-based re-acquisition is tested in test_track_reacquisition.lua.
+	self.mgr = Medusa.Services.TrackManager:new({ evidenceReacquisition = false })
 end
 
 function TestTrackManagerPruneStale:test_pruneStale_activeBecomeStale()
@@ -293,6 +313,23 @@ function TestTrackManagerPruneStale:test_reassociation_preserves_identification_
 	lu.assertEquals(reacquired.LastIdentificationTime, 1000)
 end
 
+function TestTrackManagerPruneStale:test_reassociation_keeps_the_sensor_that_first_made_the_track()
+	local original = self.mgr:processReport(makeReport())
+	original.FirstSeenBy, original.FirstSeenKind, original.FirstSeenRangeM = "ewr-north", "EWR", 50000
+	local pruneTime = mockTime + 61
+	self.mgr:pruneStale(pruneTime)
+	self.mgr:pruneStale(pruneTime)
+
+	mockTime = pruneTime + 10
+	local reacquired = self.mgr:processReport(makeReport({
+		Position = { x = 1100, y = 500, z = 2100 },
+	}))
+
+	lu.assertEquals(reacquired.FirstSeenBy, "ewr-north")
+	lu.assertEquals(reacquired.FirstSeenKind, "EWR")
+	lu.assertEquals(reacquired.FirstSeenRangeM, 50000)
+end
+
 function TestTrackManagerPruneStale:test_reassociation_preserves_harm_evidence()
 	local original = self.mgr:processReport(makeReport())
 	original.HarmAssessment = {
@@ -312,6 +349,67 @@ function TestTrackManagerPruneStale:test_reassociation_preserves_harm_evidence()
 	lu.assertEquals(reacquired.HarmAssessment.label, "CLEARED")
 	lu.assertEquals(reacquired.HarmAssessment.llr, -24.82)
 	lu.assertEquals(reacquired.HarmAssessment.scanCount, 21)
+end
+
+function TestTrackManagerPruneStale:test_reassociation_keeps_a_decoy_label_and_restarts_its_leg()
+	local original = self.mgr:processReport(makeReport())
+	original.DecoyAssessment = { label = "PROBABLE", runSince = 900, runSec = 100, launchEvidence = 30 }
+	local pruneTime = mockTime + 61
+	self.mgr:pruneStale(pruneTime)
+	self.mgr:pruneStale(pruneTime)
+
+	mockTime = pruneTime + 10
+	local reacquired = self.mgr:processReport(makeReport({
+		Position = { x = 1100, y = 500, z = 2100 },
+	}))
+
+	lu.assertEquals(reacquired.DecoyAssessment.label, "PROBABLE")
+	lu.assertEquals(reacquired.DecoyAssessment.launchEvidence, 30)
+	lu.assertNil(reacquired.DecoyAssessment.runSince)
+	lu.assertEquals(reacquired.DecoyAssessment.runSec, 0)
+end
+
+function TestTrackManagerPruneStale:test_reassociation_records_its_first_sighting()
+	self.mgr:processReport(makeReport())
+	local pruneTime = mockTime + 61
+	self.mgr:pruneStale(pruneTime)
+	self.mgr:pruneStale(pruneTime)
+
+	mockTime = pruneTime + 10
+	local reacquired = self.mgr:processReport(makeReport({
+		Position = { x = 1100, y = 500, z = 2100 },
+	}))
+
+	lu.assertEquals(reacquired.PositionHistory:size(), 1)
+	local first = reacquired.PositionHistory:get(1)
+	lu.assertEquals(first.timestamp, mockTime)
+	lu.assertEquals(first.position, { x = 1100, y = 500, z = 2100 })
+end
+
+function TestTrackManagerPruneStale:test_reassociation_restarts_a_confirmed_arms_not_attacking_window()
+	local original = self.mgr:processReport(makeReport())
+	original.HarmAssessment = {
+		label = "CONFIRMED",
+		llr = 6,
+		scanCount = 9,
+		confirmedAt = mockTime,
+		disproofSince = mockTime,
+		disproofScans = 1,
+	}
+	local pruneTime = mockTime + 61
+	self.mgr:pruneStale(pruneTime)
+	self.mgr:pruneStale(pruneTime)
+
+	mockTime = pruneTime + 10
+	local reacquired = self.mgr:processReport(makeReport({
+		Position = { x = 1100, y = 500, z = 2100 },
+	}))
+
+	local state = reacquired.HarmAssessment
+	lu.assertEquals(state.label, "CONFIRMED")
+	lu.assertNil(state.disproofSince)
+	lu.assertEquals(state.disproofScans, 0)
+	lu.assertEquals(state.confirmedAt, 1000)
 end
 
 -- == TestTrackManagerMergeSplit ==
@@ -472,6 +570,25 @@ function TestTrackManagerEventBus:test_eventBus_subscriberReceivesTrackUpdated()
 	lu.assertNotNil(event.Velocity)
 end
 
+function TestTrackManagerEventBus:test_track_update_builds_no_event_when_nothing_listens()
+	local bus = EventBus()
+	local published = 0
+	local realPublish = bus.publish
+	bus.publish = function(self, event)
+		if event.id == "TrackUpdated" then
+			published = published + 1
+		end
+		return realPublish(self, event)
+	end
+	local mgr = Medusa.Services.TrackManager:new({ eventBus = bus })
+
+	mgr:processReport(makeReport())
+	mockTime = 1010
+	mgr:processReport(makeReport({ Velocity = { x = 200, y = 0, z = 100 } }))
+
+	lu.assertEquals(published, 0)
+end
+
 function TestTrackManagerEventBus:test_eventBus_customEventBus()
 	local customBus = EventBus()
 	local mgr = Medusa.Services.TrackManager:new({ eventBus = customBus })
@@ -486,4 +603,97 @@ function TestTrackManagerEventBus:test_eventBus_customEventBus()
 	local event = receivedEvents:dequeue()
 	lu.assertNotNil(event)
 	lu.assertEquals(event.id, "TrackCreated")
+end
+
+-- == TestTrackManagerLaunchCue ==
+
+TestTrackManagerLaunchCue = {}
+
+function TestTrackManagerLaunchCue:setUp()
+	setupMocks()
+	self.mgr = Medusa.Services.TrackManager:new({ geoGrid = GeoGrid(5000, { "Track" }) })
+	self.jet = self.mgr:processReport(
+		makeReport({ NetworkId = "jet", Position = { x = 0, y = 6000, z = 0 }, Velocity = { x = 250, y = 0, z = 0 } }),
+		mockTime
+	)
+	mockTime = mockTime + 30
+end
+
+local function newContact(self, id, pos, vel)
+	return self.mgr:processReport(makeReport({ NetworkId = id, Position = pos, Velocity = vel }), mockTime)
+end
+
+function TestTrackManagerLaunchCue:test_weaponPullingAwayFromAnOlderContact_hasALaunchCue()
+	-- A HARM 2 s after launch: 300 m ahead of its jet, 280 m/s faster.
+	local harm = newContact(self, "harm", { x = 300, y = 6000, z = 0 }, { x = 530, y = -20, z = 0 })
+	lu.assertNotNil(harm.LaunchCue)
+	lu.assertEquals(harm.LaunchCue.FromTrackId, self.jet.TrackId)
+end
+
+function TestTrackManagerLaunchCue:test_wingmanAppearingNearItsLeader_hasNone()
+	local wing = newContact(self, "wing", { x = -1500, y = 6000, z = 1500 }, { x = 280, y = 0, z = 0 })
+	lu.assertNil(wing.LaunchCue)
+end
+
+function TestTrackManagerLaunchCue:test_fastJetCrossingHeadOn_hasNone()
+	-- Mach 2 interceptor 2 km past the jet on an opposite heading: opening fast, but not leaving it.
+	local mig = newContact(self, "mig", { x = -2000, y = 6000, z = 0 }, { x = -650, y = 0, z = 0 })
+	lu.assertNil(mig.LaunchCue)
+end
+
+function TestTrackManagerLaunchCue:test_contactsFirstSeenTogether_giveNoCue()
+	mockTime = mockTime - 25 -- the jet is only 5 s old: a formation coming into cover together
+	local fast = newContact(self, "fast", { x = 300, y = 6000, z = 0 }, { x = 530, y = 0, z = 0 })
+	lu.assertNil(fast.LaunchCue)
+end
+
+function TestTrackManagerLaunchCue:test_launchCue_survivesReassociation()
+	self.mgr:setEvidenceReacquisition(false) -- stock re-association by object id
+	local harm = newContact(self, "harm", { x = 300, y = 6000, z = 0 }, { x = 530, y = 0, z = 0 })
+	lu.assertNotNil(harm.LaunchCue)
+	mockTime = mockTime + 300
+	self.mgr:pruneStale(mockTime)
+	self.mgr:pruneStale(mockTime + 300)
+	local again = newContact(self, "harm", harm.Position, harm.Velocity)
+	lu.assertNotNil(again.LaunchCue)
+end
+
+-- == TestTrackManagerEvidence ==
+
+TestTrackManagerEvidence = {}
+
+function TestTrackManagerEvidence:setUp()
+	setupMocks()
+	self.mgr = Medusa.Services.TrackManager:new()
+end
+
+function TestTrackManagerEvidence:test_size_and_seen_as_fuse_from_the_first_report_on()
+	local track = self.mgr:processReport(makeReport({ SizeDb = -11, SizeVarDb = 9 }), mockTime)
+	lu.assertEquals(track.SizeDb, -11)
+	mockTime = mockTime + 2
+	self.mgr:processReport(makeReport({ SizeDb = -9, SizeVarDb = 9, SeenAs = "MUNITION" }), mockTime)
+	lu.assertAlmostEquals(track.SizeDb, -10, 1e-9)
+	lu.assertEquals(track.SeenAs, "MUNITION")
+	lu.assertEquals(track.SeenAsTime, mockTime)
+end
+
+function TestTrackManagerEvidence:test_size_and_seen_as_survive_reassociation()
+	self.mgr:setEvidenceReacquisition(false) -- stock re-association by object id
+	local track = self.mgr:processReport(makeReport({ SizeDb = 6, SizeVarDb = 4, SeenAs = "AIRCRAFT" }), mockTime)
+	for _ = 1, 3 do
+		mockTime = mockTime + 2
+		self.mgr:processReport(makeReport({ SizeDb = 6, SizeVarDb = 4 }), mockTime)
+	end
+	local weight = track.SizeWeight
+	mockTime = mockTime + 61
+	self.mgr:pruneStale(mockTime)
+	self.mgr:pruneStale(mockTime)
+	lu.assertEquals(self.mgr:getStore():count(), 0)
+	mockTime = mockTime + 5
+	local again = self.mgr:processReport(makeReport(), mockTime)
+	lu.assertEquals(again.SizeDb, 6)
+	lu.assertEquals(again.SizeWeight, weight)
+	lu.assertEquals(again.SizeSpreadDb, track.SizeSpreadDb)
+	lu.assertEquals(again.SeenAs, "AIRCRAFT")
+	lu.assertEquals(again.SeenAsTime, 1000)
 end

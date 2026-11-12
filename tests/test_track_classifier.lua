@@ -514,3 +514,35 @@ function TestAssessAircraftTypes:test_harm_track_not_overwritten()
 
 	lu.assertEquals(track.AssessedAircraftType, "HARM")
 end
+
+function TestUpdateIdentifications:test_training_mode_sets_identification_timers_at_their_midpoint()
+	local saved = math.random
+	math.random = function()
+		return 0.99
+	end
+	local track = makeTrack({ TrackIdentification = "UNKNOWN" })
+	self.trackStore:add(track)
+	local ctx =
+		self:makeCtx({ now = track.FirstDetectionTime, doctrine = { Posture = "WARM_WAR", TrainingMode = true } })
+
+	Medusa.Services.TrackClassifier.updateIdentifications(ctx)
+	math.random = saved
+
+	lu.assertEquals(track.IntelIdentifyTime, ctx.now + (45 + 120) / 2)
+	lu.assertEquals(track.VIDIdentifyTime, ctx.now + (60 + 180) / 2)
+end
+
+function TestUpdateIdentifications:test_a_busy_net_stretches_identification_timers()
+	local track = makeTrack({ TrackIdentification = "UNKNOWN" })
+	self.trackStore:add(track)
+	local ctx = self:makeCtx({
+		now = track.FirstDetectionTime,
+		doctrine = { Posture = "WARM_WAR", TrainingMode = true },
+		idDwellFactor = 1.5,
+	})
+
+	Medusa.Services.TrackClassifier.updateIdentifications(ctx)
+
+	lu.assertEquals(track.IntelIdentifyTime, ctx.now + 1.5 * (45 + 120) / 2)
+	lu.assertEquals(track.VIDIdentifyTime, ctx.now + 1.5 * (60 + 180) / 2)
+end

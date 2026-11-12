@@ -68,6 +68,12 @@ local function is_enabled(current, level)
 	return levelRank <= currentRank
 end
 
+--- True when a message at `level` (TRACE, DEBUG, INFO, ERROR) would be written: callers skip building a message
+--- nobody will see.
+function Medusa.Logger:isEnabled(level)
+	return is_enabled(self._level, level)
+end
+
 function Medusa.Logger:trace(msg)
 	if is_enabled(self._level, "TRACE") then
 		emit("TRACE", msg)

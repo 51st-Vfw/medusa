@@ -937,6 +937,7 @@ AI = {
 				ALARM_STATE = 9,
 				ROE = 0,
 				DISPERSE_ON_ATTACK = 8,
+				ENGAGE_AIR_WEAPONS = 20,
 			},
 			val = {
 				ALARM_STATE = {

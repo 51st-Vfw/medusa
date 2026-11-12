@@ -113,6 +113,8 @@ function Medusa.Entities.Battery.newAaaState()
 		UnitHeadings = {},
 		UnitHeadingCount = 0,
 		FireTaskActive = false,
+		-- Told where to look by a local radar or an observer report until this time (AaaService.cue).
+		CuedUntil = nil,
 	}
 end
 
@@ -197,6 +199,29 @@ function Medusa.Entities.Battery.new(data)
 		CrewSuppressionTimerId = nil,
 		LastTerminalEventId = data.LastTerminalEventId,
 		IsActingAsEWR = data.IsActingAsEWR or false,
+		-- Decoy response (DecoyResponseService): engage-air-weapons as last written (nil = never written), this
+		-- battery's crew-guided missiles in flight, a test-shot weapons hold, whether its missiles lose guidance under
+		-- that hold (no more test shots), and what is in its reach this pass.
+		EngageAirWeapons = nil,
+		MissilesInFlight = nil,
+		LastLaunchAt = nil,
+		TestShotHold = nil,
+		HoldBreaksGuidance = nil,
+		DecoyReach = nil,
+		-- Fire discipline: the hold asked or in force ({ TrackId, Trigger, Since, Until (nil while it waits), Span }),
+		-- holds made per decoy lineage and when last, recent hold spans (the budget), the last fire-control lock read,
+		-- and since when an engage-air-weapons write has waited for launches to settle.
+		FireHold = nil,
+		FireHoldCounts = nil,
+		FireHoldCountAt = nil,
+		FireHoldSpans = nil,
+		LockReadAt = nil,
+		EawWaitSince = nil,
+		EawWaitLogged = nil,
+		-- Local picture: the battery's local cueing radar state (LocalRadarService) and a time until which a local cue
+		-- (local radar, observer report, the crew's own sighting) holds the battery WARM against EMCON.
+		LocalRadar = nil,
+		CueWarmUntil = nil,
 		PkRangeOptimal = data.PkRangeOptimal,
 		PkRangeSigma = data.PkRangeSigma,
 		LastAssignmentChangeTime = data.LastAssignmentChangeTime,
@@ -258,6 +283,8 @@ function Medusa.Entities.Battery.newUnit(data)
 		HeadingDegrees = data.HeadingDegrees,
 		HeadingIndex = data.HeadingIndex,
 		CrewSkill = data.CrewSkill,
+		-- True when the mission file does not give this unit's skill (CrewSkill is the doctrine's default).
+		CrewSkillDefaulted = data.CrewSkillDefaulted == true,
 		LastTerminalEventId = data.LastTerminalEventId,
 	}
 end
@@ -543,6 +570,7 @@ function Medusa.Entities.Battery.applyDegradedBehavior(battery, degradation, con
 	end
 	if degradation == "SEARCH_LOST_CP_ALIVE" then
 		BAS.erectGroup(battery.GroupName)
+		BAS.releaseDecoyResponse(battery)
 		Medusa.Entities.Battery.releaseTrack(battery, context.trackStore)
 		return "weapons_free"
 	end

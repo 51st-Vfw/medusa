@@ -26,6 +26,8 @@ function Medusa.Services.TrackStore:new()
 	local o = {
 		_byId = {},
 		_byIdentification = {},
+		-- Tracks per identification (O(1) counts for the net load).
+		_idCount = {},
 		_count = 0,
 		_logger = Medusa.Logger:ns("TrackStore"),
 	}
@@ -46,6 +48,7 @@ function Medusa.Services.TrackStore:add(track)
 		self._byIdentification[identification] = {}
 	end
 	self._byIdentification[identification][track.TrackId] = track
+	self._idCount[identification] = (self._idCount[identification] or 0) + 1
 
 	self._logger:debug(
 		string.format(
@@ -71,6 +74,7 @@ function Medusa.Services.TrackStore:remove(trackId)
 	self._count = self._count - 1
 
 	local identification = track.TrackIdentification
+	self._idCount[identification] = (self._idCount[identification] or 1) - 1
 	local identificationIndex = self._byIdentification[identification]
 	if identificationIndex then
 		identificationIndex[trackId] = nil
@@ -119,6 +123,11 @@ function Medusa.Services.TrackStore:count()
 	return self._count
 end
 
+--- Number of tracks with this identification (O(1)).
+function Medusa.Services.TrackStore:countByIdentification(identification)
+	return self._idCount[identification] or 0
+end
+
 function Medusa.Services.TrackStore:getStaleIds(thresholdTime)
 	local staleIds = {}
 	for trackId, track in pairs(self._byId) do
@@ -152,8 +161,13 @@ function Medusa.Services.TrackStore:updateIdentification(trackId, newIdentificat
 		self._byIdentification[newIdentification] = {}
 	end
 	self._byIdentification[newIdentification][trackId] = track
+	self._idCount[oldIdentification] = (self._idCount[oldIdentification] or 1) - 1
+	self._idCount[newIdentification] = (self._idCount[newIdentification] or 0) + 1
 
 	track.TrackIdentification = newIdentification
+	if self.onIdentified then
+		self.onIdentified(track, oldIdentification, newIdentification)
+	end
 	self._logger:debug(
 		string.format(
 			"re-identified track %s: %s -> %s",

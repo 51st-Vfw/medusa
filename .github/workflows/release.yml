@@ -1,50 +1,50 @@
-name: Medusa Release
+name: Medusa BKE Release
 
 on:
     push:
         tags:
-            - 'v*.*.*'
+            - 'BKEv*.*.*'
 
 env:
-    ARTIFACT_NAME: medusa-thin.lua
-    BUNDLED_ARTIFACT_NAME: medusa.lua
-    ARTIFACT_ZIP: medusa-thin.zip
-    BUNDLED_ARTIFACT_ZIP: medusa.zip
+    ARTIFACT_NAME: medusa-bke-thin.lua
+    BUNDLED_ARTIFACT_NAME: medusa-bke.lua
+    ARTIFACT_ZIP: medusa-bke-thin.zip
+    BUNDLED_ARTIFACT_ZIP: medusa-bke.zip
     BUILD_DIR: ./dist
     RELEASE_DIR: ./dist/release
-    RELEASES_HOST: releases.medusa.airdefense.systems
+    RELEASE_BRANCH: black-knight-edition
 
 permissions: {}
 
 jobs:
     release-guard:
-        name: Guard - Tag points to main
+        name: Guard - Tag points to black-knight-edition
         runs-on: ubuntu-24.04
         permissions:
             contents: read
         outputs:
-            on_main: ${{ steps.check.outputs.on_main }}
+            on_release_branch: ${{ steps.check.outputs.on_release_branch }}
         steps:
             - name: Checkout
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
               with:
                   fetch-depth: 0
-            - name: Determine if tag commit is on main
+            - name: Determine if tag commit is on black-knight-edition
               id: check
               shell: bash
               run: |
-                  git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
-                  if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-                    echo "on_main=true" >> "$GITHUB_OUTPUT"
+                  git fetch --no-tags --prune origin "+refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"
+                  if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$RELEASE_BRANCH"; then
+                    echo "on_release_branch=true" >> "$GITHUB_OUTPUT"
                   else
-                    echo "on_main=false" >> "$GITHUB_OUTPUT"
+                    echo "on_release_branch=false" >> "$GITHUB_OUTPUT"
                   fi
 
     validate:
         name: Validate release
         runs-on: ubuntu-24.04
         needs: release-guard
-        if: needs.release-guard.outputs.on_main == 'true'
+        if: needs.release-guard.outputs.on_release_branch == 'true'
         permissions:
             contents: read
         steps:
@@ -72,7 +72,7 @@ jobs:
               shell: bash
               run: |
                   set -e
-                  TAG_VERSION="${REF_NAME#v}"
+                  TAG_VERSION="${REF_NAME#BKEv}"
                   FILE_VERSION=$(python -c "
                   import re; from pathlib import Path
                   m = re.search(r'version\s*=\s*\"(\d+\.\d+\.\d+)\"', Path('pyproject.toml').read_text())
@@ -90,7 +90,7 @@ jobs:
               shell: bash
               run: |
                   set -e
-                  VERSION="${REF_NAME#v}"
+                  VERSION="${REF_NAME#BKEv}"
                   SECTION=$(python -c "
                   import re; from pathlib import Path
                   content = Path('CHANGELOG.md').read_text()
@@ -121,14 +121,14 @@ jobs:
 
             - name: Verify version stamped
               run: |
-                if grep -q '{{VERSION}}' '${{ env.BUILD_DIR }}/${{ env.ARTIFACT_NAME }}'; then
-                  echo "::error::{{VERSION}} placeholder found in ${{ env.ARTIFACT_NAME }}"
-                  exit 1
-                fi
-                if grep -q '{{VERSION}}' '${{ env.BUILD_DIR }}/${{ env.BUNDLED_ARTIFACT_NAME }}'; then
-                  echo "::error::{{VERSION}} placeholder found in ${{ env.BUNDLED_ARTIFACT_NAME }}"
-                  exit 1
-                fi
+                for placeholder in '{{VERSION}}' '{{MEDUSA_BASE}}'; do
+                  for artifact in '${{ env.ARTIFACT_NAME }}' '${{ env.BUNDLED_ARTIFACT_NAME }}'; do
+                    if grep -qF "$placeholder" "${{ env.BUILD_DIR }}/$artifact"; then
+                      echo "::error::$placeholder placeholder found in $artifact"
+                      exit 1
+                    fi
+                  done
+                done
 
             - name: Lint thin
               uses: YoloWingPixie/selene-lua-linter-action@24ecf180fd5bb4d3b40b4296de61b32179cb79d1 # v1
@@ -149,7 +149,7 @@ jobs:
                 working-directory: '.'
 
     release:
-        name: Release on main tags only
+        name: Release on black-knight-edition tags only
         runs-on: ubuntu-24.04
         needs: validate
         permissions:
@@ -182,92 +182,19 @@ jobs:
               run: |
                   python ./scripts/build/extract_changelog_section.py "$REF_NAME" CHANGELOG.md RELEASE_NOTES.md
 
-            - name: Create Github Release
+            - name: Create GitHub Release
               uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
               with:
-                name: 'Release ${{ github.ref_name }}'
+                name: '${{ github.ref_name }} - Medusa IADS - Black Knight Edition'
                 make_latest: true
                 prerelease: false
                 draft: false
                 body_path: RELEASE_NOTES.md
                 fail_on_unmatched_files: true
                 files: |
-                    ${{ env.RELEASE_DIR }}/${{ env.ARTIFACT_ZIP }}
+                    ${{ env.RELEASE_DIR }}/${{ env.BUNDLED_ARTIFACT_NAME }}
+                    ${{ env.RELEASE_DIR }}/${{ env.ARTIFACT_NAME }}
                     ${{ env.RELEASE_DIR }}/${{ env.BUNDLED_ARTIFACT_ZIP }}
+                    ${{ env.RELEASE_DIR }}/${{ env.ARTIFACT_ZIP }}
                     ${{ env.RELEASE_DIR }}/SHA256SUMS.txt
                     LICENSE
-
-            - name: Upload to R2 (versioned)
-              uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-              with:
-                apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                command: |
-                    r2 object put ${{ secrets.R2_BUCKET_NAME }}/releases/${{ github.ref_name }}/${{ env.BUNDLED_ARTIFACT_ZIP }} --file=${{ env.RELEASE_DIR }}/${{ env.BUNDLED_ARTIFACT_ZIP }} --remote
-                    r2 object put ${{ secrets.R2_BUCKET_NAME }}/releases/${{ github.ref_name }}/${{ env.ARTIFACT_ZIP }} --file=${{ env.RELEASE_DIR }}/${{ env.ARTIFACT_ZIP }} --remote
-                    r2 object put ${{ secrets.R2_BUCKET_NAME }}/releases/${{ github.ref_name }}/SHA256SUMS.txt --file=${{ env.RELEASE_DIR }}/SHA256SUMS.txt --remote
-
-            - name: Upload to R2 (latest)
-              uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-              with:
-                apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                command: |
-                    r2 object put ${{ secrets.R2_BUCKET_NAME }}/releases/latest/${{ env.BUNDLED_ARTIFACT_ZIP }} --file=${{ env.RELEASE_DIR }}/${{ env.BUNDLED_ARTIFACT_ZIP }} --remote
-                    r2 object put ${{ secrets.R2_BUCKET_NAME }}/releases/latest/${{ env.ARTIFACT_ZIP }} --file=${{ env.RELEASE_DIR }}/${{ env.ARTIFACT_ZIP }} --remote
-                    r2 object put ${{ secrets.R2_BUCKET_NAME }}/releases/latest/SHA256SUMS.txt --file=${{ env.RELEASE_DIR }}/SHA256SUMS.txt --remote
-
-            - name: Purge latest downloads from Cloudflare cache
-              env:
-                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  zone_id=$(curl --fail-with-body --silent --show-error \
-                    "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$R2_BUCKET_NAME/domains/custom/$RELEASES_HOST" \
-                    --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                    | jq -er '.result.zoneId')
-                  curl --fail-with-body --silent --show-error \
-                    "https://api.cloudflare.com/client/v4/zones/$zone_id/purge_cache" \
-                    --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                    --json "{\"files\":[\"https://$RELEASES_HOST/releases/latest/$BUNDLED_ARTIFACT_ZIP\",\"https://$RELEASES_HOST/releases/latest/$ARTIFACT_ZIP\",\"https://$RELEASES_HOST/releases/latest/SHA256SUMS.txt\"]}"
-
-    sync-docs:
-        name: Request docs changelog sync
-        runs-on: ubuntu-24.04
-        needs: release
-        timeout-minutes: 5
-        permissions: {}
-        env:
-            DOCS_REPOSITORY: docs
-        steps:
-            - name: Create docs sync token
-              id: docs-token
-              uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-              with:
-                  client-id: ${{ vars.DOCS_SYNC_APP_CLIENT_ID }}
-                  private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
-                  owner: ${{ github.repository_owner }}
-                  repositories: ${{ env.DOCS_REPOSITORY }}
-                  permission-contents: write
-
-            - name: Dispatch docs changelog sync
-              env:
-                  GH_TOKEN: ${{ steps.docs-token.outputs.token }}
-                  RELEASE_SHA: ${{ github.sha }}
-                  RELEASE_TAG: ${{ github.ref_name }}
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  jq -n \
-                    --arg tag "$RELEASE_TAG" \
-                    --arg sha "$RELEASE_SHA" \
-                    '{event_type: "medusa-release", client_payload: {tag: $tag, sha: $sha}}' \
-                    | gh api \
-                      --method POST \
-                      --header "Accept: application/vnd.github+json" \
-                      --header "X-GitHub-Api-Version: 2022-11-28" \
-                      "repos/$GITHUB_REPOSITORY_OWNER/$DOCS_REPOSITORY/dispatches" \
-                      --input -

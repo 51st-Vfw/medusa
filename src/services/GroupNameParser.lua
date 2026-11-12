@@ -13,7 +13,9 @@ require("core.Constants")
                                                                                                                                                     
     What this service does
     - Parses a DCS group name that follows the dot-echelon naming convention into structured data.
-    - Extracts the managed prefix, roles (GCI, EWR, HQ), hierarchy path, and a human label.
+    - Extracts the managed prefix, roles (GCI, EWR, HQ, AWACS, OBSERVER), hierarchy path, and a human label.
+      OBSERVER ("obs", "observer" or Roles.OBSERVER) marks an observer post: a group whose crew radios what it sees.
+      ESM ("esm", "elint" or Roles.ESM) marks a listening station: a group that takes bearings on aircraft radars.
     - Supports both exact and prefix-style role matching for backward compatibility.
 
     How others use it
@@ -36,6 +38,8 @@ require("core.Constants")
 Medusa.Services.GroupNameParser = {}
 
 local EWR_ALIASES = { ewr = true, radar = true, sensor = true }
+local OBSERVER_ALIASES = { obs = true, observer = true }
+local ESM_ALIASES = { esm = true, elint = true }
 
 --- Check if a segment matches a role token.
 --- Supports both exact match ("ewr") and prefix match ("ewr north", "ewr-1")
@@ -62,6 +66,26 @@ local function isEwrToken(seg, configToken)
 	return configToken and segmentMatchesToken(seg, configToken)
 end
 
+--- Observer post token ("obs", "observer" or the configured Roles.OBSERVER): a group whose crew reports what it sees.
+local function isObserverToken(seg, configToken)
+	for alias in pairs(OBSERVER_ALIASES) do
+		if segmentMatchesToken(seg, alias) then
+			return true
+		end
+	end
+	return configToken and segmentMatchesToken(seg, configToken)
+end
+
+--- Listening station token ("esm", "elint" or the configured Roles.ESM).
+local function isEsmToken(seg, configToken)
+	for alias in pairs(ESM_ALIASES) do
+		if segmentMatchesToken(seg, alias) then
+			return true
+		end
+	end
+	return configToken and segmentMatchesToken(seg, configToken)
+end
+
 function Medusa.Services.GroupNameParser:_findRoleIndexes(segments, tokens)
 	local roleIndexes = {}
 	for i = 1, #segments do
@@ -73,6 +97,8 @@ function Medusa.Services.GroupNameParser:_findRoleIndexes(segments, tokens)
 				or isEwrToken(seg, tokens.EWR)
 				or segmentMatchesToken(seg, tokens.HQ)
 				or segmentMatchesToken(seg, tokens.AWACS or "awacs")
+				or isObserverToken(seg, tokens.OBSERVER)
+				or isEsmToken(seg, tokens.ESM)
 			)
 		then
 			roleIndexes[#roleIndexes + 1] = i
@@ -105,6 +131,10 @@ function Medusa.Services.GroupNameParser:_rolesFromSegments(segments, tokens)
 		elseif tokens and segmentMatchesToken(seg, tokens.HQ) then
 			roles[#roles + 1] = Medusa.Constants.Role.HQ
 			isHq = true
+		elseif isObserverToken(seg, tokens and tokens.OBSERVER) then
+			roles[#roles + 1] = Medusa.Constants.Role.OBSERVER
+		elseif isEsmToken(seg, tokens and tokens.ESM) then
+			roles[#roles + 1] = Medusa.Constants.Role.ESM
 		end
 	end
 	return roles, sensorType, isHq

@@ -67,5 +67,9 @@ function Medusa.Entities.SensorUnit.new(data)
 		ConnectionNodeId = data.ConnectionNodeId,
 		DetectableTargetTypes = data.DetectableTargetTypes,
 		GciServicedAirbaseIds = data.GciServicedAirbaseIds,
+		-- The group was named with a sensor role (EWR/GCI/AWACS): the mission maker asked for an early-warning radar.
+		NamedRole = data.NamedRole or false,
+		-- Set once probing shows a short-reach radar (LocalRadarService): managed as a local cueing radar, not by EMCON.
+		IsLocalRadar = false,
 	}
 end

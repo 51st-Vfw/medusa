@@ -5,6 +5,7 @@ require("core.Constants")
 require("core.Logger")
 require("entities.Battery")
 require("entities.Track")
+require("core.Debrief")
 
 --[[
             ██╗  ██╗ █████╗ ██████╗ ███╗   ███╗    ██████╗ ███████╗████████╗███████╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗
@@ -182,33 +183,122 @@ end
 --- with proximity. Cold batteries are excluded because they are not radiating and
 --- cannot be targeted by an ARM.
 --- @param track table Track entity with .Position
---- @param geoGrid table GeoGrid spatial index for battery lookups
---- @param batteryStore table BatteryStore for filtering by activation state
+--- @param emitters table Index from buildEmitterIndex
 --- @return table|nil emitterPos Position {x,y,z} of the closest active emitter, or nil if none in range
-local function findClosestEmitter(track, geoGrid, batteryStore)
-	local AS = Medusa.Constants.ActivationState
-	local batteries = Medusa.Services.SpatialQuery.batteriesInRadius(
-		geoGrid,
-		batteryStore,
-		track.Position,
-		Medusa.Constants.HARM_MAX_RANGE_M
-	)
-	local best, bestDist = nil, math.huge
-	for i = 1, #batteries do
-		local b = batteries[i]
-		if
-			(b.ActivationState == AS.STATE_WARM or b.ActivationState == AS.STATE_HOT)
-			and not Medusa.Entities.Battery.isIndependentAaa(b)
-			and b.Position
-		then
-			local dist = Distance2D(track.Position, b.Position)
-			if dist < bestDist then
-				best = b.Position
-				bestDist = dist
-			end
+local function findClosestEmitter(track, emitters)
+	local n = emitters.activeCount
+	if n == 0 then
+		return nil
+	end
+	local active = emitters.active
+	local tx, tz = track.Position.x, track.Position.z
+	local maxRange = C.HARM_MAX_RANGE_M
+	local best, bestSq = nil, maxRange * maxRange
+	for i = 1, n do
+		local p = active[i]
+		local dx, dz = p.x - tx, p.z - tz
+		local dSq = dx * dx + dz * dz
+		if dSq <= bestSq then
+			best = p
+			bestSq = dSq
 		end
 	end
 	return best
+end
+
+--- Battery positions the HARM checks need, built once per HARM phase so each track scans a short array with
+--- squared distances instead of running a 130 km grid query. `active` holds WARM/HOT non-AAA emitters; `targets`
+--- holds every non-AAA battery in any state (what a confirmed ARM may still be flying at).
+--- The arrays are reused across calls; the result is valid until the next call.
+--- @param batteryStore table BatteryStore
+--- @return table emitters { active = Vec3[], activeCount = number, targets = Vec3[], targetCount = number }
+local _emitterIndex = { active = {}, activeCount = 0, targets = {}, targetCount = 0 }
+local _batteryBuffer = {}
+function Medusa.Services.HarmDetectionService.buildEmitterIndex(batteryStore)
+	local AS = Medusa.Constants.ActivationState
+	local isIndependentAaa = Medusa.Entities.Battery.isIndependentAaa
+	local active, targets = _emitterIndex.active, _emitterIndex.targets
+	local count, targetCount = 0, 0
+	local batteries = batteryStore:getAll(_batteryBuffer)
+	for i = 1, #batteries do
+		local b = batteries[i]
+		if b.Position and not isIndependentAaa(b) then
+			targetCount = targetCount + 1
+			targets[targetCount] = b.Position
+			local st = b.ActivationState
+			if st == AS.STATE_WARM or st == AS.STATE_HOT then
+				count = count + 1
+				active[count] = b.Position
+			end
+		end
+	end
+	for i = count + 1, _emitterIndex.activeCount do
+		active[i] = nil
+	end
+	for i = targetCount + 1, _emitterIndex.targetCount do
+		targets[i] = nil
+	end
+	_emitterIndex.activeCount = count
+	_emitterIndex.targetCount = targetCount
+	return _emitterIndex
+end
+
+--- True when the ground track is attacking some battery: closing on it, passing within the miss limit, and
+--- arriving within the time-to-go limit (shorter for a slow, coasting track). Height is ignored (a lofted ARM's 3D
+--- closest approach stays kilometres off until its final dive).
+local function isAttackingAnyBattery(pos, vel, emitters)
+	local vx, vz = vel.x, vel.z
+	local vhSq = vx * vx + vz * vz
+	if vhSq < 1 then
+		return false
+	end
+	local vh = math.sqrt(vhSq)
+	local tgoLimit = vh < C.HARM_DISPROOF_SLOW_MPS and C.HARM_DISPROOF_SLOW_TIME_TO_GO_SEC
+		or C.HARM_DISPROOF_TIME_TO_GO_SEC
+	local maxRange = tgoLimit * vh
+	local maxRangeSq = maxRange * maxRange
+	local missLimit = C.HARM_DISPROOF_MISS_M * vh
+	local minClosing = C.HARM_DISPROOF_CLOSING_MPS
+	local px, pz = pos.x, pos.z
+	local targets = emitters.targets
+	for i = 1, emitters.targetCount do
+		local t = targets[i]
+		local rx, rz = t.x - px, t.z - pz
+		local rSq = rx * rx + rz * rz
+		if rSq <= maxRangeSq then
+			if rSq < 1 then
+				return true
+			end
+			local r = math.sqrt(rSq)
+			local closing = (rx * vx + rz * vz) / r
+			if closing > minClosing and math.abs(rx * vz - rz * vx) < missLimit and r < tgoLimit * closing then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+--- Track the evidence that a confirmed ARM is not one. Returns true once it has flown for the window (and the minimum
+--- number of scans) without attacking any battery or under the speed gate, or has been confirmed too long.
+local function confirmedArmDisproved(state, curr, emitters, slow)
+	local now = curr.timestamp
+	if state.confirmedAt and now - state.confirmedAt >= C.HARM_CONFIRMED_MAX_SEC then
+		return true
+	end
+	if slow or not isAttackingAnyBattery(curr.position, curr.velocity, emitters) then
+		if not state.disproofSince then
+			state.disproofSince = now
+			state.disproofScans = 1
+		else
+			state.disproofScans = state.disproofScans + 1
+		end
+		return state.disproofScans >= C.HARM_DISPROOF_MIN_SCANS
+			and now - state.disproofSince >= C.HARM_DISPROOF_WINDOW_SEC
+	end
+	state.disproofSince = nil
+	state.disproofScans = 0
+	return false
 end
 
 --- Extract the 8-element kinematic feature vector from two consecutive position
@@ -334,26 +424,114 @@ local function formatFeatureLLRs(feat)
 	return table.concat(parts, " ")
 end
 
-local function updateLabel(state)
+local function markConfirmed(state, now)
+	state.label = HAS.CONFIRMED
+	state.confirmedAt = now
+	state.disproofSince = nil
+	state.disproofScans = 0
+end
+
+local CE = Medusa.Constants.ContactEvidence
+local SEEN = Medusa.Constants.SeenAs
+
+--- Contact evidence as one bounded prior on the ARM score, in the SPRT's natural-log likelihood-ratio units,
+--- recomputed from the track's current estimates at every evaluation (replaced, never accumulated into the score):
+--- - Return size, only once the fused estimate is confident (Track.sizeClass): linear in (split - estimate), reaching
+---   HARM_SIZE_PRIOR_MAX (the SUSPECT threshold) at an ARM's size and HARM_SIZE_PRIOR_MIN (a sighting's -6) at the
+---   smallest fighter's. A positive (small, ARM-like) term counts only while the kinematic score alone is at least
+---   SUSPECT and never exceeds it: return size never turns a contact that flies like a jet into an ARM. Low-observable
+---   aircraft (0.001-0.005 m2, smaller than an ARM) are therefore harder to classify, as they should be, but are
+---   never confirmed on size. A confident aircraft-sized ("large") return also blocks CONFIRMED outright (updateLabel).
+--- - Seen as an aircraft or helicopter at sight range: HARM_SEEN_AIRCRAFT_PRIOR. Seen as a munition is no ARM
+---   evidence (a TALD or a JSOW is a munition too).
+--- @param track table
+--- @param kinematicLlr number The accumulated kinematic score
+--- @return number prior
+function Medusa.Services.HarmDetectionService.evidencePrior(track, kinematicLlr)
+	local prior = 0
+	if Medusa.Entities.Track.sizeClass(track) then
+		local x = (CE.SIZE_SPLIT_DBSM - track.SizeDb) / CE.HARM_SIZE_PRIOR_REF_DB
+		if x > 0 then
+			prior = math.min(x, 1) * CE.HARM_SIZE_PRIOR_MAX
+		else
+			prior = math.min(-x, 1) * CE.HARM_SIZE_PRIOR_MIN
+		end
+		if prior > 0 then
+			if kinematicLlr < C.HARM_SPRT_THRESH_SUSPECT then
+				prior = 0
+			elseif prior > kinematicLlr then
+				prior = kinematicLlr
+			end
+		end
+	end
+	local seen = track.SeenAs
+	if seen == SEEN.AIRCRAFT or seen == SEEN.HELICOPTER then
+		prior = prior + CE.HARM_SEEN_AIRCRAFT_PRIOR
+	end
+	return prior
+end
+local evidencePrior = Medusa.Services.HarmDetectionService.evidencePrior
+
+--- What stops a track being confirmed as an ARM now, or nil. A crew does not call a confident 5 m2 return an ARM
+--- (about 0.08 m2), however ARM-like it flies ("size", Track.sizeClass "large"); nor a contact that appeared beside an
+--- aircraft and has shown no motor ("unpowered", a released store), nor one still being watched for a motor
+--- ("window"; Track.Release, Medusa.Constants.Release).
+local function confirmBlock(track)
+	local r = track.Release
+	if r and r.Unpowered then
+		return "unpowered"
+	end
+	if Medusa.Entities.Track.sizeClass(track) == "large" then
+		return "size"
+	end
+	return r and "window" or nil
+end
+Medusa.Services.HarmDetectionService.confirmBlock = confirmBlock
+
+--- A confirmed ARM keeps its label whatever its score says (the score is held at the clear threshold) until
+--- `disproved` is set by its flight; then it clears with its score at or below the clear threshold. Other labels
+--- are judged on the kinematic score plus the evidence prior (`state.prior`). A track with a confirm block
+--- (`blockedBy`, confirmBlock) is never confirmed: it may still be SUSPECT or PROBABLE (alert zones see it; point
+--- defence engages a released store predicted to fall on the site it protects, PointDefenseService.storeFallsOn; a
+--- CLEARED track that would have been confirmed becomes PROBABLE, unless it is aircraft-sized), and an ARM already
+--- confirmed stays so. A block that held back a confirmation is noted in state.blockedBy.
+local function updateLabel(state, now, disproved, blockedBy)
 	if state.label == HAS.CONFIRMED then
-		if state.llr <= C.HARM_SPRT_THRESH_CLEAR then
+		if disproved then
 			state.label = HAS.CLEARED
+			state.llr = math.min(state.llr, C.HARM_SPRT_THRESH_CLEAR)
+			state.confirmedAt = nil
+			state.disproofSince = nil
+			state.disproofScans = 0
+		elseif state.llr < C.HARM_SPRT_THRESH_CLEAR then
+			state.llr = C.HARM_SPRT_THRESH_CLEAR
 		end
 		return state.label
 	end
+	local score = state.llr + (state.prior or 0)
 	if state.label == HAS.CLEARED then
-		if state.llr >= C.HARM_SPRT_THRESH_CONFIRM then
-			state.label = HAS.CONFIRMED
+		if score >= C.HARM_SPRT_THRESH_CONFIRM then
+			if blockedBy then
+				state.blockedBy = blockedBy
+				if blockedBy ~= "size" then
+					state.label = HAS.PROBABLE
+				end
+			else
+				markConfirmed(state, now)
+			end
 		end
 		return state.label
 	end
-	if state.llr >= C.HARM_SPRT_THRESH_CONFIRM then
-		state.label = HAS.CONFIRMED
-	elseif state.llr <= C.HARM_SPRT_THRESH_CLEAR then
-		state.label = HAS.CLEARED
-	elseif state.llr >= C.HARM_SPRT_THRESH_PROBABLE then
+	if score >= C.HARM_SPRT_THRESH_CONFIRM and not blockedBy then
+		markConfirmed(state, now)
+	elseif score >= C.HARM_SPRT_THRESH_CONFIRM then
+		state.blockedBy = blockedBy
 		state.label = HAS.PROBABLE
-	elseif state.llr >= C.HARM_SPRT_THRESH_SUSPECT then
+	elseif score <= C.HARM_SPRT_THRESH_CLEAR then
+		state.label = HAS.CLEARED
+	elseif score >= C.HARM_SPRT_THRESH_PROBABLE then
+		state.label = HAS.PROBABLE
+	elseif score >= C.HARM_SPRT_THRESH_SUSPECT then
 		state.label = HAS.SUSPECT
 	else
 		state.label = HAS.EVALUATING
@@ -361,7 +539,7 @@ local function updateLabel(state)
 	return state.label
 end
 
-local function createAssessment(track, emitterPos)
+local function createAssessment(track, emitterPos, now)
 	local confirmed = track.AssessedAircraftType == AAT.HARM
 	local state = {
 		llr = confirmed and C.HARM_SPRT_THRESH_CONFIRM or 0,
@@ -374,6 +552,8 @@ local function createAssessment(track, emitterPos)
 	if confirmed then
 		state.previousAircraftType = AAT.UNKNOWN
 		state.previousIsSeadThreat = false
+		state.confirmedAt = now
+		state.disproofScans = 0
 	end
 	track.HarmAssessment = state
 	_logger:info(string.format("track %s entered ARM evaluation", Medusa.Entities.Track.displayId(track)))
@@ -392,7 +572,9 @@ local function updateEmitterPosition(state, emitterPos)
 end
 
 local function accumulateEvidence(state, scanLlr)
-	state.llr = state.llr + math.max(-C.HARM_SPRT_MAX_SCAN_LLR, math.min(C.HARM_SPRT_MAX_SCAN_LLR, scanLlr))
+	local contribution = math.max(-C.HARM_SPRT_MAX_SCAN_LLR, math.min(C.HARM_SPRT_MAX_SCAN_LLR, scanLlr))
+	local limit = C.HARM_SPRT_ACCUMULATED_LLR_LIMIT
+	state.llr = math.max(-limit, math.min(limit, state.llr + contribution))
 end
 
 local function logStateChange(track, previousLabel, state, feat)
@@ -427,7 +609,7 @@ end
 --- @param effectiveMinScans number|nil Minimum scans before an SPRT decision (defaults to HARM_SPRT_MIN_SCANS)
 --- @return string label Current SPRT label for this track
 --- @return table|nil state The SPRT state table, or nil if track has insufficient data
-local function evaluateTrack(track, geoGrid, batteryStore, ballisticDt, ballisticMaxT, effectiveMinScans)
+local function evaluateTrack(track, emitters, ballisticDt, ballisticMaxT, effectiveMinScans)
 	local n = track.PositionHistory:size()
 	if n < 2 then
 		local state = track.HarmAssessment
@@ -454,21 +636,26 @@ local function evaluateTrack(track, geoGrid, batteryStore, ballisticDt, ballisti
 		end
 		state.prevTime = curr.timestamp
 		state.scanCount = state.scanCount + 1
+		state.prior = 0
 		local previousLabel = state.label
+		local disproved = false
 		if state.label == HAS.EVALUATING or state.label == HAS.SUSPECT or state.label == HAS.PROBABLE then
 			state.llr = math.min(state.llr - C.HARM_SPRT_MAX_SCAN_LLR, C.HARM_SPRT_THRESH_CLEAR)
 		else
 			accumulateEvidence(state, -C.HARM_SPRT_MAX_SCAN_LLR)
+			if state.label == HAS.CONFIRMED then
+				disproved = confirmedArmDisproved(state, curr, emitters, true)
+			end
 		end
-		updateLabel(state)
+		updateLabel(state, curr.timestamp, disproved, confirmBlock(track))
 		logStateChange(track, previousLabel, state)
 		return state.label, state
 	end
 
-	local emitterPos = findClosestEmitter(track, geoGrid, batteryStore)
+	local emitterPos = findClosestEmitter(track, emitters)
 	if emitterPos then
 		if not state then
-			state = createAssessment(track, emitterPos)
+			state = createAssessment(track, emitterPos, curr.timestamp)
 		else
 			updateEmitterPosition(state, emitterPos)
 		end
@@ -499,14 +686,20 @@ local function evaluateTrack(track, geoGrid, batteryStore, ballisticDt, ballisti
 	lf[7] = feat[7]
 	lf[8] = feat[8]
 
+	local disproved = false
+	if state.label == HAS.CONFIRMED then
+		disproved = confirmedArmDisproved(state, curr, emitters, false)
+	end
+
 	local minScans = effectiveMinScans or C.HARM_SPRT_MIN_SCANS
 	local scanLlr = computeScanLLR(feat)
 	accumulateEvidence(state, scanLlr)
-	if state.scanCount < minScans then
+	state.prior = evidencePrior(track, state.llr)
+	if state.scanCount < minScans and not disproved then
 		return state.label, state
 	end
 
-	updateLabel(state)
+	updateLabel(state, curr.timestamp, disproved, confirmBlock(track))
 	logStateChange(track, previousLabel, state, feat)
 
 	return state.label, state
@@ -526,37 +719,47 @@ end
 --- Assesses a single track for HARM classification via SPRT.
 --- @param track table Track entity
 --- @param tracks table Array of all tracks (for launcher backtracking)
---- @param geoGrid table GeoGrid spatial index
+--- @param _geoGrid table Unused (kept for callers; emitters come from the battery store)
 --- @param batteryStore table BatteryStore for emitter proximity lookups
 --- @param ballisticDt number Ballistic sim time step
 --- @param ballisticMaxT number Ballistic sim max steps
+--- @param emitters table|nil Index from buildEmitterIndex (built here when nil)
+--- @param networkId string|nil The assessing network (named on its DEBRIEF line; nil: the network being ticked)
 --- @return boolean reclassified True if this track was newly classified as HARM
 function Medusa.Services.HarmDetectionService.assessSingleTrack(
 	track,
 	tracks,
-	geoGrid,
+	_geoGrid,
 	batteryStore,
 	ballisticDt,
-	ballisticMaxT
+	ballisticMaxT,
+	emitters,
+	networkId
 )
 	local LS = Medusa.Constants.TrackLifecycleState
 	local vel = track.Velocity
 	local speedSq = vel and (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z) or 0
-	local trackAge = track.FirstDetectionTime and (GetTime() - track.FirstDetectionTime) or 0
 	if
 		track.LifecycleState ~= LS.ACTIVE
 		or not vel
 		or (not track.HarmAssessment and speedSq < C.HARM_SPRT_SPEED_GATE * C.HARM_SPRT_SPEED_GATE)
-		or (not track.HarmAssessment and trackAge < C.HARM_SPRT_MIN_TRACK_AGE_SEC)
 	then
 		return false
 	end
 
 	local previousLabel = track.HarmAssessment and track.HarmAssessment.label
-	local label, state = evaluateTrack(track, geoGrid, batteryStore, ballisticDt, ballisticMaxT)
+	emitters = emitters or Medusa.Services.HarmDetectionService.buildEmitterIndex(batteryStore)
+	local label, state = evaluateTrack(track, emitters, ballisticDt, ballisticMaxT)
 
+	if state and state.blockedBy then
+		Medusa.Services.HarmDetectionService._noteBlocked(track, state, networkId)
+	end
 	if state then
-		track.HarmLikelihoodScore = math.max(0, math.min(1, state.llr / math.max(0.001, C.HARM_SPRT_THRESH_CONFIRM)))
+		local score = state.llr
+		if state.label ~= HAS.CONFIRMED then
+			score = score + (state.prior or 0)
+		end
+		track.HarmLikelihoodScore = math.max(0, math.min(1, score / math.max(0.001, C.HARM_SPRT_THRESH_CONFIRM)))
 	end
 
 	if label == HAS.CONFIRMED and previousLabel ~= HAS.CONFIRMED then
@@ -573,6 +776,17 @@ function Medusa.Services.HarmDetectionService.assessSingleTrack(
 				Medusa.Entities.Track.displayId(track),
 				state.llr
 			)
+		)
+		Medusa.Debrief.emit(
+			networkId,
+			nil,
+			"ARM_CONFIRMED",
+			"track",
+			Medusa.Entities.Track.displayId(track),
+			"llr",
+			string.format("%.2f", state.llr),
+			"scans",
+			state.scanCount
 		)
 		Medusa.Services.HarmDetectionService._backtrackLauncher(track, tracks)
 		return true
@@ -597,6 +811,45 @@ function Medusa.Services.HarmDetectionService.assessSingleTrack(
 	return false
 end
 
+--- A confirm block held back a confirmation: say so once per track and reason (log and an ARM_BLOCKED debrief line),
+--- so the battle log shows why the ARM-like contact was not called an ARM.
+function Medusa.Services.HarmDetectionService._noteBlocked(track, state, networkId)
+	local why = state.blockedBy
+	state.blockedBy = nil
+	local noted = state.blocksNoted
+	if not noted then
+		noted = {}
+		state.blocksNoted = noted
+	elseif noted[why] then
+		return
+	end
+	noted[why] = true
+	local id = Medusa.Entities.Track.displayId(track)
+	_logger:info(
+		string.format(
+			"track %s flies like an ARM (LLR=%.2f) but is not confirmed: %s",
+			id,
+			state.llr,
+			why == "unpowered" and "it dropped off an aircraft and has no motor"
+				or why == "window" and "it appeared beside an aircraft; watching for a motor"
+				or "its return is aircraft-sized"
+		)
+	)
+	Medusa.Debrief.emit(
+		networkId,
+		nil,
+		"ARM_BLOCKED",
+		"track",
+		id,
+		"why",
+		why,
+		"llr",
+		string.format("%.2f", state.llr),
+		"scans",
+		state.scanCount
+	)
+end
+
 --- Top-level entry point called by IadsNetwork each tick.
 --- Iterates all active tracks in the network. For each eligible track, runs
 --- evaluateTrack to accumulate SPRT evidence and update the label.
@@ -614,6 +867,7 @@ function Medusa.Services.HarmDetectionService.assessHarmThreats(ctx)
 	local reclassified = 0
 
 	local ballisticDt, ballisticMaxT = Medusa.Services.HarmDetectionService.getAssessContext(ctx)
+	local emitters = Medusa.Services.HarmDetectionService.buildEmitterIndex(batteryStore)
 
 	for i = 1, #tracks do
 		if
@@ -623,7 +877,9 @@ function Medusa.Services.HarmDetectionService.assessHarmThreats(ctx)
 				geoGrid,
 				batteryStore,
 				ballisticDt,
-				ballisticMaxT
+				ballisticMaxT,
+				emitters,
+				ctx.networkId
 			)
 		then
 			reclassified = reclassified + 1
@@ -636,11 +892,31 @@ function Medusa.Services.HarmDetectionService.assessHarmThreats(ctx)
 	return reclassified
 end
 
---- Find the aircraft that launched a confirmed HARM by comparing ring buffer
---- positions at the same timestamp. At launch, the HARM and its launcher are
---- co-located. We check the HARM's oldest ring buffer entry against every
---- other track's position at that same time. The search radius is bounded by
---- the total distance the HARM has traveled since first detection.
+-- Scratch state for the backtrack's history walk (one callback, no per-candidate closure or copy).
+local _bt = { originTime = 0, window = 0, bestEntry = nil, bestDt = 0 }
+local function _backtrackVisit(entry)
+	if not entry or not entry.position then
+		return true
+	end
+	local dt = entry.timestamp - _bt.originTime
+	if dt < -_bt.window then
+		return false
+	end
+	local adt = dt < 0 and -dt or dt
+	if adt < _bt.bestDt then
+		_bt.bestDt = adt
+		_bt.bestEntry = entry
+	elseif dt < 0 then
+		return false -- older entries only move further from the HARM's first sighting
+	end
+	return true
+end
+
+--- Find the aircraft that launched a confirmed HARM. At launch the HARM and its launcher are co-located, so each
+--- candidate's position at the HARM's first sighting is estimated from its history entry nearest that time (within
+--- HARM_BACKTRACK_WINDOW_SEC, walked newest first in place), dead-reckoned with that entry's velocity. Radars refresh
+--- tracks every 1-10 s, so an exact time match is rare. The search radius is bounded by the total distance the HARM
+--- has traveled since first detection.
 function Medusa.Services.HarmDetectionService._backtrackLauncher(harmTrack, allTracks)
 	local harmRing = harmTrack.PositionHistory
 	local harmSize = harmRing:size()
@@ -665,6 +941,9 @@ function Medusa.Services.HarmDetectionService._backtrackLauncher(harmTrack, allT
 	local bestTrack = nil
 	local bestDistSq = searchRadiusSq
 
+	local window = C.HARM_BACKTRACK_WINDOW_SEC
+	_bt.originTime = originTime
+	_bt.window = window
 	for i = 1, #allTracks do
 		local candidate = allTracks[i]
 		if
@@ -672,22 +951,30 @@ function Medusa.Services.HarmDetectionService._backtrackLauncher(harmTrack, allT
 			and candidate.AssessedAircraftType ~= AAT.HARM
 			and candidate.PositionHistory
 		then
-			local cHistory = candidate.PositionHistory:toArray()
-			for ci = 1, #cHistory do
-				local entry = cHistory[ci]
-				if entry and entry.position and math.abs(entry.timestamp - originTime) < 3 then
-					local cdx = entry.position.x - originX
-					local cdz = entry.position.z - originZ
-					local distSq = cdx * cdx + cdz * cdz
-					if distSq < bestDistSq then
-						bestDistSq = distSq
-						bestTrack = candidate
-					end
-					break
+			_bt.bestEntry = nil
+			_bt.bestDt = window
+			local oldestEntry = candidate.PositionHistory:peek()
+			-- first seen well after the HARM was: it was not there to launch it
+			if oldestEntry and oldestEntry.timestamp - originTime < window then
+				candidate.PositionHistory:reverseIter(_backtrackVisit)
+			end
+			local entry = _bt.bestEntry
+			if entry then
+				local lag = originTime - entry.timestamp
+				local v = entry.velocity
+				local cx = entry.position.x + (v and v.x or 0) * lag
+				local cz = entry.position.z + (v and v.z or 0) * lag
+				local cdx = cx - originX
+				local cdz = cz - originZ
+				local distSq = cdx * cdx + cdz * cdz
+				if distSq < bestDistSq then
+					bestDistSq = distSq
+					bestTrack = candidate
 				end
 			end
 		end
 	end
+	_bt.bestEntry = nil
 
 	if bestTrack then
 		bestTrack.HostileActionConfirmed = true
@@ -703,6 +990,9 @@ function Medusa.Services.HarmDetectionService._backtrackLauncher(harmTrack, allT
 	end
 end
 
-Medusa.Services.HarmDetectionService._evaluateTrack = evaluateTrack
+Medusa.Services.HarmDetectionService._isAttackingAnyBattery = isAttackingAnyBattery
+Medusa.Services.HarmDetectionService._evaluateTrack = function(track, _, batteryStore, ...)
+	return evaluateTrack(track, Medusa.Services.HarmDetectionService.buildEmitterIndex(batteryStore), ...)
+end
 Medusa.Services.HarmDetectionService._computeScanLLR = computeScanLLR
 Medusa.Services.HarmDetectionService._extractFeatures = extractFeatures

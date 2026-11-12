@@ -2,6 +2,16 @@
 
 Thanks for your interest in contributing to Medusa. This document covers what you need to know before submitting code.
 
+## [BKE] Medusa IADS - Black Knight Edition
+
+This repository, https://github.com/51st-Vfw/medusa, is Medusa IADS - Black Knight Edition (BKE), the customised
+build of Medusa used by the 667th Black Knights and the 51st VFW, based on Medusa v1.6.0. Contributions are best made
+to official Medusa IADS: https://github.com/medusa-iads/medusa. BKE does not seek outside contributions; 51st VFW and
+667th members with BKE requests or contributions should contact Blackdog of the 667th.
+
+The rest of this document is stock Medusa's and applies to BKE as well. BKE work lives on the `black-knight-edition`
+branch, which is also its release branch.
+
 ## Versioning
 
 Medusa uses [Semantic Versioning 2.0.0](https://semver.org/)
@@ -41,8 +51,8 @@ Medusa uses [keep a changelog](https://keepachangelog.com/en/1.1.0/) format for 
 
 **Verify your setup:**
 ```bash
-task test          # 278 tests, 0 failures
-task build         # produces dist/medusa.lua and dist/medusa-thin.lua
+task test          # [BKE] 1337 tests, 0 failures
+task build         # [BKE] produces dist/medusa-bke.lua and dist/medusa-bke-thin.lua
 task complexity:check  # reports Lua complexity warnings
 ```
 
