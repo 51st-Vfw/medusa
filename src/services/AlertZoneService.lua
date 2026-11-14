@@ -254,7 +254,7 @@ do
 		-- A contact seen leaving an aircraft is a weapon for its whole life, whatever the ARM check later says (in
 		-- DCS, HARMs not yet judged, or cleared after their target died, otherwise read as jets), unless its return
 		-- is confidently aircraft-sized (a false cue: a wingman pulling away). A crew that saw it as a weapon within
-		-- sight range never calls it an aircraft (a TALD returns like a fighter but is recognised close up).
+		-- sight range never calls it an aircraft (a TALD returns like a fighter but is recognized close up).
 		local size = Medusa.Entities.Track.sizeClass(track)
 		if aat == AAT.MISSILE or (track.LaunchCue and size ~= "large") or track.SeenAs == SEEN.MUNITION then
 			return "munition"

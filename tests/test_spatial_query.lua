@@ -105,3 +105,44 @@ function TestBatteriesInRadius:test_battery_removed_from_store_not_returned()
 
 	lu.assertEquals(#result, 0)
 end
+
+-- The radius search runs for every HARM, track assignment and point-defense check, often with radii that cover most
+-- of a network; it must find exactly what the grid's own queryRadius finds, without allocating per call once warm.
+function TestBatteriesInRadius:test_matches_grid_query_and_allocates_nothing_once_warm()
+	local seed = 7
+	local function rnd()
+		seed = (seed * 16807) % 2147483647
+		return seed / 2147483647
+	end
+	for _ = 1, 150 do
+		local b = makeBattery({ Position = { x = (rnd() - 0.5) * 400000, y = 0, z = (rnd() - 0.5) * 400000 } })
+		self.store:add(b)
+		self.grid:add("Battery", b.BatteryId, b.Position)
+	end
+	local SQ = Medusa.Services.SpatialQuery
+	for _ = 1, 40 do
+		local pos = { x = (rnd() - 0.5) * 500000, y = 0, z = (rnd() - 0.5) * 500000 }
+		local radius = rnd() * 200000
+		local expected, n = {}, 0
+		for id in pairs(self.grid:queryRadius(pos, radius, { "Battery" }).BatteryIds) do
+			expected[id] = true
+			n = n + 1
+		end
+		local got = SQ.batteriesInRadius(self.grid, self.store, pos, radius)
+		lu.assertEquals(#got, n)
+		for i = 1, #got do
+			lu.assertTrue(expected[got[i].BatteryId])
+		end
+	end
+
+	local pos = { x = 0, y = 0, z = 0 }
+	SQ.batteriesInRadius(self.grid, self.store, pos, 150000)
+	collectgarbage("collect")
+	collectgarbage("stop")
+	local before = collectgarbage("count")
+	local got = SQ.batteriesInRadius(self.grid, self.store, pos, 150000)
+	local allocatedKb = collectgarbage("count") - before
+	collectgarbage("restart")
+	lu.assertTrue(#got > 50)
+	lu.assertEquals(allocatedKb, 0)
+end

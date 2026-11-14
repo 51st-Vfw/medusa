@@ -5,7 +5,7 @@
 
 # Medusa IADS - Black Knight Edition (BKE) documentation
 
-This is the documentation for **Medusa IADS - Black Knight Edition (BKE) v0.0.1**, based on Medusa v1.6.0.
+This is the documentation for **Medusa IADS - Black Knight Edition (BKE) v0.1.0**, based on Medusa v1.6.0.
 
 BKE is Medusa with additions and changes for the 667th Black Knights and the 51st VFW. Everything Medusa 1.6.0 does,
 BKE does too, set up the same way. These pages cover what BKE adds or changes, and every configuration and doctrine
@@ -36,13 +36,12 @@ below say where.
 
 | Page | What it covers |
 |---|---|
-| [Naming conventions](naming-conventions.md) | Stock naming, plus the BKE role tokens `obs` / `observer` (observer posts) and `esm` / `elint` (listening stations) |
+| [Naming conventions](naming-conventions.md) | Stock naming, plus the BKE role tokens `obs` / `observer` (observer posts) |
 | [HARM detection and contact evidence](harm-detection.md) | **[BKE]** Faster HARM classification, per-radar refresh rates, return size, launch cues, crew sightings, sticky ARM labels, finding the shooter |
 | [Released stores: a bomb is not a missile](released-stores.md) | **[BKE]** Why a bomb or glide bomb dropped near a radar is not called an ARM |
-| [Decoys and fire discipline](decoys.md) | **[BKE]** Recognising TALD-type decoys, engage-air-weapons, fire holds, test shots |
+| [Decoys and fire discipline](decoys.md) | **[BKE]** Recognizing TALD-type decoys, engage-air-weapons, fire holds, test shots |
 | [Track re-acquisition](track-reacquisition.md) | **[BKE]** Picking a lost track back up from where it should be and how it flies |
 | [Local cueing radars and observer posts](local-radars-and-observers.md) | **[BKE]** Dog Ear-type radars that cue guns and MANPADs, crews and observer posts that radio what they see |
-| [ESM listening stations](esm-listening-stations.md) | **[BKE]** Passive stations that take bearings on aircraft radars and cross them into fixes |
 | [Crews, readiness and training mode](crews-and-readiness.md) | **[BKE]** Crew skill, readiness (`SURPRISED` / `ALERTED` / `ENGAGED`), net load, training mode |
 | [Alert zones](alert-zones.md) | **[BKE]** Trigger zones whose flags count what the IADS radars see, for editor triggers |
 | [Debrief log](debrief-log.md) | **[BKE]** The `DEBRIEF` lines in dcs.log: every event and its fields |
@@ -72,7 +71,7 @@ the [debrief log](debrief-log.md).
 |---|---|
 | [bke-doctrine-config.lua](../examples/bke-doctrine-config.lua) | Every BKE doctrine field at its default, commented |
 | [bke-stock-behaviour-config.lua](../examples/bke-stock-behaviour-config.lua) | Every BKE switch off, to compare with Medusa 1.6.0 |
-| [bke-ground-sensors-config.lua](../examples/bke-ground-sensors-config.lua) | Group naming for observer posts, local cueing radars and listening stations, with their settings |
+| [bke-ground-sensors-config.lua](../examples/bke-ground-sensors-config.lua) | Group naming for observer posts and local cueing radars, with their settings |
 | [bke-alert-zones.lua](../examples/bke-alert-zones.lua) | Alert-zone trigger-zone properties and the editor triggers that read them |
 | [bke-training-config.lua](../examples/bke-training-config.lua) | Training mode for practice against the network |
 | [bke-surprised-network-config.lua](../examples/bke-surprised-network-config.lua) | A network that starts surprised, raised by a mission script |

@@ -12,6 +12,8 @@ require("entities.C2Node")
 require("services.stores.SensorUnitStore")
 require("services.stores.BatteryStore")
 require("services.stores.C2NodeStore")
+require("entities.ObserverPost")
+require("services.stores.ObserverPostStore")
 require("services.EntityFactory")
 
 -- == Helpers ==
@@ -384,4 +386,40 @@ function TestEntityFactory:test_sensor_with_nil_units_returns_zero()
 	lu.assertEquals(kind, "sensor")
 	lu.assertEquals(count, 0)
 	lu.assertEquals(stores.sensors:count(), 0)
+end
+
+function TestEntityFactory:test_a_group_named_as_a_listening_station_is_an_untrained_lookout_post_with_a_notice()
+	GetGroupUnits = function()
+		return { makeMockUnit(101, "truck-1"), makeMockUnit(102, "truck-2") }
+	end
+	local origError = env.error
+	local errors = {}
+	env.error = function(msg)
+		errors[#errors + 1] = msg
+	end
+	local stores = makeStores()
+	stores.observers = Medusa.Services.ObserverPostStore:new()
+	local Role = Medusa.Constants.Role
+	local kind = Medusa.Services.EntityFactory.createFromDTO(
+		makeDTO({ groupName = "iads.esm.ridge", parsed = { roles = { Role.ESM } } }),
+		stores,
+		"net"
+	)
+	Medusa.Services.EntityFactory.createFromDTO(
+		makeDTO({ groupName = "iads.obs.esm.hill", parsed = { roles = { Role.OBSERVER, Role.ESM } } }),
+		stores,
+		"net"
+	)
+	env.error = origError
+	lu.assertEquals(kind, "observer")
+	local ridge = stores.observers:getByGroupName("iads.esm.ridge")
+	lu.assertFalse(ridge.Watch)
+	lu.assertNil(ridge.Esm)
+	lu.assertTrue(stores.observers:getByGroupName("iads.obs.esm.hill").Watch)
+	lu.assertEquals(#errors, 2)
+	lu.assertStrContains(errors[1], "iads.esm.ridge")
+	lu.assertStrContains(errors[1], "listening stations were removed")
+	lu.assertStrContains(errors[1], "an untrained lookout post")
+	lu.assertStrContains(errors[2], "iads.obs.esm.hill")
+	lu.assertStrContains(errors[2], "an observer post")
 end

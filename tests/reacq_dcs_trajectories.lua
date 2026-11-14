@@ -1,6 +1,6 @@
 -- Scenes recorded in DCS World 2.9 (dedicated server, Caucasus, AI only) for evidence-based re-acquisition,
 -- sampled every 2 s (a SAM search radar refreshes every 5 s, a HOT engagement radar every 2 s). Rows are
--- { t, x, y, z, vx, vy, vz }: seconds since the scene start, DCS world metres (y = altitude MSL) and m/s. Tracks are in
+-- { t, x, y, z, vx, vy, vz }: seconds since the scene start, DCS world meters (y = altitude MSL) and m/s. Tracks are in
 -- the order DCS first reported them. kind: "jet", "arm" or "tald".
 return {
 	{

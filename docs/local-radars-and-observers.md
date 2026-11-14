@@ -1,9 +1,8 @@
 # [BKE] Local cueing radars and observer posts
 
-Two layers of the air defence below the SAM network: small search radars that warn the guns and MANPADs around them,
+Two layers of the air defense below the SAM network: small search radars that warn the guns and MANPADs around them,
 and the crews of every ground group, who radio what they see or hear. Both are on by default and need nothing from the
-mission maker beyond placing the units; observer posts need one name token. A third layer, listening stations that
-take bearings on aircraft radars, has its own page: [ESM listening stations](esm-listening-stations.md).
+mission maker beyond placing the units; observer posts need one name token.
 
 ## Local cueing radars
 
@@ -38,10 +37,10 @@ supports, an observer report or its own periodic sweep. To keep it an always-on 
 token in its group name (for example `iads.north.ewr.dogear-1`). This is the one BKE change that can alter an existing
 mission ([Differences from Medusa 1.6.0](differences-from-medusa-1.6.0.md)).
 
-A dark cueing radar still counts as one of the network's radar groups. Doctrine `SAMAsEWR = "WHEN_NO_EWR"` (the
-default) turns long- and medium-range SAM search radars into early-warning radars only when the network has no radar
-group left, so a network whose only radar is a lone Dog Ear does not fall back to its SAMs: it is blind until the Dog
-Ear comes up. Name the Dog Ear `ewr`, add a real early-warning radar, or set `SAMAsEWR = "ALWAYS"`.
+A cueing radar is not an early-warning radar. Doctrine `SAMAsEWR = "WHEN_NO_EWR"` (the default) turns long- and
+medium-range SAM search radars into early-warning radars when the network has no early-warning radar, so a network
+whose only radar is a lone, unnamed Dog Ear uses its SAMs as early-warning radars, as stock Medusa does for a network
+without one. A Dog Ear named `ewr`, an early-warning or GCI radar, or an AWACS keeps the SAMs as SAMs.
 
 Group set-ups (any group Medusa manages; no role token needed):
 
@@ -98,9 +97,10 @@ When a report arrives:
   10 km covers it comes up WARM (radar on, weapons hold) for two minutes, unless the network already holds a track
   within 15 km of the reported position (the network engages what it tracks) or the mission sets an EMCON policy for
   the battery's role (an ambush site set to `MINIMIZE` stays dark; the built-in defaults do not count). Long-range
-  batteries are never woken by a report. An unidentified report wakes no SAM. Its own radar must then find the aircraft before the network engages: a report is
-  never a track, never a firing solution, never makes a battery HOT, and alert zones do not count reports. Its
-  radar feeds the network picture while WARM only with doctrine `BatteryTargetDatalink` (default on).
+  batteries are never woken by a report. An unidentified report wakes no SAM. Its own radar must then find the aircraft
+  before the network engages: a report is never a track, never a firing solution, never makes a battery HOT, and alert
+  zones do not count reports. Its radar feeds the network picture while WARM only with doctrine `BatteryTargetDatalink`
+  (default on).
 
 No SAM is woken under ROE HOLD, a HARM shutdown or crew suppression.
 
@@ -119,16 +119,18 @@ readiness and the net load decide whether the call reaches the right people. The
 
 **Set your crews' skill.** A crew of Average skill, the Mission Editor's default for ground units, gets a report out
 about one time in four. So do units spawned during the mission and units set to Random or Player skill (they count as
-`CrewSuppression.DefaultCrewSkill`, Average unless you change it). Excellent crews report almost every time.
+`CrewFactorsDefaultSkill`, which follows `CrewSuppression.DefaultCrewSkill`, Average, unless set). Excellent crews
+report almost every time.
 
 Observer posts are trained observers: they count one skill level higher (Average reports as Good; Excellent stays),
 keep looking at their full rate when the network is SURPRISED, and get 80% of their reports through under surprise
 (other crews 60%). Each network logs one `crew roster` line at start: posts and crews by skill, and how many took the
 default skill.
 
-In [training mode](crews-and-readiness.md#training-mode) (doctrine `TrainingMode`) a report's position is off by the typical error, half its bound in each
-direction, in a fixed direction per post and report, never the exact position; local radar sweeps keep their 3-5
-minute rhythm at a fixed point per radar, so the network's radars do not all sweep together.
+In [training mode](crews-and-readiness.md#training-mode) (doctrine `TrainingMode`) a report's position is off by the
+typical error, half its bound in each direction, in a fixed direction per post and report, never the exact position;
+local radar sweeps keep their 3-5 minute rhythm at a fixed point per radar, so the network's radars do not all sweep
+together.
 
 ## Doctrine
 

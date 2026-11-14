@@ -182,12 +182,22 @@ jobs:
               run: |
                   python ./scripts/build/extract_changelog_section.py "$REF_NAME" CHANGELOG.md RELEASE_NOTES.md
 
+            # BKEv0.y.z tags publish a pre-release (BKE is a beta while its major version is 0), never marked
+            # latest; BKEv1.0.0 and later publish a normal release marked latest.
+            - name: Decide release kind
+              id: kind
+              env:
+                REF_NAME: ${{ github.ref_name }}
+              shell: bash
+              run: |
+                  python ./scripts/build/release_kind.py "$REF_NAME" >> "$GITHUB_OUTPUT"
+
             - name: Create GitHub Release
               uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
               with:
                 name: '${{ github.ref_name }} - Medusa IADS - Black Knight Edition'
-                make_latest: true
-                prerelease: false
+                make_latest: ${{ steps.kind.outputs.make_latest }}
+                prerelease: ${{ steps.kind.outputs.prerelease }}
                 draft: false
                 body_path: RELEASE_NOTES.md
                 fail_on_unmatched_files: true

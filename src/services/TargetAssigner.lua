@@ -72,7 +72,7 @@ function Medusa.Services.TargetAssigner._decoyFactor(track)
 end
 
 --- A PROBABLE decoy is never assigned to a long/medium-range SAM (a gliding one that threatens a battery is left to
---- point defence).
+--- point defense).
 function Medusa.Services.TargetAssigner._decoyBarred(track, role)
 	return Medusa.Constants.Decoy.MANAGED_ROLES[role] == true
 		and Medusa.Services.DecoyAssessmentService.isProbable(track)

@@ -170,6 +170,48 @@ function TestAmmoExtraction:test_aaa_prefers_reported_shell_range_over_fallback(
 	lu.assertEquals(ammo[1].RangeMax, 20000)
 end
 
+local TUNGUSKA_AMMO = {
+	{ count = 8, desc = { typeName = "9M311", displayName = "9M311", missileCategory = 2, rangeMaxAltMax = 8000 } },
+	{ count = 1904, desc = { typeName = "weapons.shells.2A38_30_HE", displayName = "30mm HE", rangeMaxAltMax = 4000 } },
+}
+
+function TestAmmoExtraction:test_a_sam_unit_with_guns_keeps_only_its_missiles_and_says_it_has_a_gun()
+	GetUnitAmmo = function()
+		return TUNGUSKA_AMMO
+	end
+
+	local ammo, count, gunNames =
+		Medusa.Services.EntityFactory.extractAmmo("tunguska", Medusa.Constants.BatteryRole.SR_SAM)
+
+	lu.assertEquals(count, 8)
+	lu.assertEquals(#ammo, 1)
+	lu.assertEquals(ammo[1].WeaponTypeName, "9M311")
+	lu.assertEquals(gunNames, { ["weapons.shells.2A38_30_HE"] = true, ["30mm HE"] = true })
+end
+
+function TestAmmoExtraction:test_a_unit_with_only_guns_in_a_sam_battery_says_it_has_a_gun()
+	GetUnitAmmo = function()
+		return { TUNGUSKA_AMMO[2] }
+	end
+
+	local ammo, count, gunNames =
+		Medusa.Services.EntityFactory.extractAmmo("shilka", Medusa.Constants.BatteryRole.SR_SAM)
+
+	lu.assertNil(ammo)
+	lu.assertEquals(count, 0)
+	lu.assertEquals(gunNames, { ["weapons.shells.2A38_30_HE"] = true, ["30mm HE"] = true })
+end
+
+function TestAmmoExtraction:test_a_missile_only_unit_has_no_gun()
+	GetUnitAmmo = function()
+		return { TUNGUSKA_AMMO[1] }
+	end
+
+	local _, _, gunNames = Medusa.Services.EntityFactory.extractAmmo("osa", Medusa.Constants.BatteryRole.SR_SAM)
+
+	lu.assertNil(gunNames)
+end
+
 function TestAmmoExtraction:test_recompute_single_launcher()
 	local battery = makeBattery({
 		Units = {
@@ -427,4 +469,73 @@ function TestAmmoIntegration:test_ammo_via_entity_factory()
 	lu.assertEquals(battery.EngagementAltitudeMin, 25)
 	lu.assertEquals(battery.TotalAmmoStatus, 4)
 	lu.assertEquals(battery.EngagementRangeMax, 75000)
+end
+
+function TestAmmoIntegration:test_units_that_carry_a_gun_are_marked_in_a_sam_battery()
+	require("entities.SensorUnit")
+	require("entities.C2Node")
+	require("services.stores.BatteryStore")
+	require("services.stores.SensorUnitStore")
+	require("services.stores.C2NodeStore")
+
+	local function mockUnit(id, name)
+		return {
+			getID = function()
+				return id
+			end,
+			getName = function()
+				return name
+			end,
+		}
+	end
+	local units = { mockUnit(1, "tunguska"), mockUnit(2, "shilka"), mockUnit(3, "osa") }
+	local descs = {
+		tunguska = { attributes = { ["SAM LL"] = true, ["SR SAM"] = true } },
+		shilka = { attributes = { ["AAA"] = true } },
+		osa = { attributes = { ["SAM LL"] = true, ["SR SAM"] = true } },
+	}
+	local ammo = {
+		tunguska = TUNGUSKA_AMMO,
+		shilka = { TUNGUSKA_AMMO[2] },
+		osa = { TUNGUSKA_AMMO[1] },
+	}
+	GetGroupUnits = function()
+		return units
+	end
+	GetUnitID = function(u)
+		return u.getID()
+	end
+	GetUnitType = function(name)
+		return name
+	end
+	GetUnitPosition = function()
+		return { x = 100, y = 0, z = 200 }
+	end
+	GetUnitDesc = function(u)
+		return descs[u.getName()]
+	end
+	GetUnitAmmo = function(name)
+		return ammo[name]
+	end
+
+	local stores = {
+		batteries = Medusa.Services.BatteryStore:new(),
+		sensors = Medusa.Services.SensorUnitStore:new(),
+		c2Nodes = Medusa.Services.C2NodeStore:new(),
+	}
+	local dto = { groupId = 2, groupName = "mixed.group", parsed = { roles = {}, echelonPath = {}, isHQ = false } }
+
+	Medusa.Services.EntityFactory.createFromDTO(dto, stores, "net1")
+
+	local battery = stores.batteries:getAll()[1]
+	lu.assertNotNil(battery)
+	local byName = {}
+	for i = 1, #battery.Units do
+		byName[battery.Units[i].UnitName] = battery.Units[i]
+	end
+	lu.assertTrue(byName.tunguska.GunNames["30mm HE"])
+	lu.assertEquals(byName.tunguska.AmmoCount, 8)
+	lu.assertTrue(byName.shilka.GunNames["weapons.shells.2A38_30_HE"])
+	lu.assertEquals(byName.shilka.AmmoCount, 0)
+	lu.assertNil(byName.osa.GunNames)
 end

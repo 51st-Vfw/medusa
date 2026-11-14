@@ -16,7 +16,8 @@ require("services.TrackManager")
 -- Evidence-based re-acquisition against recorded DCS scenes (tests/reacq_dcs_trajectories.lua): every 10 s, every
 -- contact in view drops out together for G seconds (a worst case: siblings lost at once), then the real TrackManager
 -- sees them again under the same DCS object ids, which it must not use. ARMs are held as confirmed and TALDs as
--- probable decoys when they drop out.
+-- probable decoys when they drop out. `held` scenes keep the default track memory (30 s): the silent tracks are still
+-- held, and the contacts come back as other DCS objects, so only the evidence can join them.
 
 local scenes = require("reacq_dcs_trajectories")
 local HAS = Medusa.Constants.HarmAssessmentState
@@ -45,22 +46,30 @@ local function report(tr, r)
 	}
 end
 
+local held = false
+
 local function newManager()
 	local mgr = Medusa.Services.TrackManager:new({
 		geoGrid = GeoGrid(10000, { "Battery", "Track" }),
 		displayIdAllocator = Medusa.Services.TrackDisplayIdAllocator:new(),
 		evidenceReacquisition = true,
 	})
-	mgr._trackMemoryDurationSec = 1
+	if not held then
+		mgr._trackMemoryDurationSec = 1
+	end
 	return mgr
 end
 
-local function process(mgr, tr, r)
+local function process(mgr, tr, r, rename)
 	mockTime = r[1]
-	return mgr:processReport(report(tr, r), mockTime)
+	local rep = report(tr, r)
+	if rename then
+		rep.NetworkId = tr.name .. "#2"
+	end
+	return mgr:processReport(rep, mockTime)
 end
 
---- The contacts in view at t0 that live on past t1, fed from their last 6 s, labelled, then all dropped.
+--- The contacts in view at t0 that live on past t1, fed from their last 6 s, labeled, then all dropped.
 local function loseScene(scene, t0, t1)
 	local lost, rows = {}, {}
 	for _, tr in ipairs(scene.tracks) do
@@ -92,9 +101,19 @@ local function loseScene(scene, t0, t1)
 			L.track.DecoyAssessment = { label = DS.PROBABLE, launchEvidence = 0, runSec = 0 }
 		end
 	end
-	mockTime = t0 + 1.6
-	mgr:pruneStale(mockTime)
-	mgr:pruneStale(mockTime)
+	if held then
+		-- The network prunes every tick while they are silent (here every second, and just before they reappear).
+		for t = t0 + 1, t1 - 1 do
+			mockTime = t
+			mgr:pruneStale(t)
+		end
+		mockTime = t1 - 0.1
+		mgr:pruneStale(mockTime)
+	else
+		mockTime = t0 + 1.6
+		mgr:pruneStale(mockTime)
+		mgr:pruneStale(mockTime)
+	end
 	return mgr, lost, byDisplay
 end
 
@@ -102,7 +121,7 @@ local function reappear(mgr, lost, t1, visit)
 	for _, L in ipairs(lost) do
 		local r = row(L.tr, t1)
 		if r and t1 - r[1] < 1.5 then
-			visit(L, process(mgr, L.tr, r))
+			visit(L, process(mgr, L.tr, r, held))
 		end
 	end
 end
@@ -117,14 +136,19 @@ local function decoyLabel(track)
 end
 
 local function closedWorld(gap)
-	local n = { arm = 0, armKept = 0, jetArm = 0, tald = 0, taldKept = 0, otherDecoy = 0 }
+	local n = { arm = 0, armKept = 0, jetArm = 0, tald = 0, taldKept = 0, otherDecoy = 0, taken = 0, wrongTake = 0 }
 	for _, scene in ipairs(scenes) do
 		local stop = scene.tracks[1].pts[#scene.tracks[1].pts][1]
 		for t0 = 10, stop, 10 do
-			local mgr, lost = loseScene(scene, t0, t0 + gap)
+			local mgr, lost, byDisplay = loseScene(scene, t0, t0 + gap)
 			reappear(mgr, lost, t0 + gap, function(L, track)
 				local kind = L.tr.kind
 				n[kind] = (n[kind] or 0) + 1
+				local who = byDisplay[track.DisplayTrackId]
+				if who then
+					n.taken = n.taken + 1
+					n.wrongTake = n.wrongTake + (who ~= L and 1 or 0)
+				end
 				if kind == "arm" and isArm(track) then
 					n.armKept = n.armKept + 1
 				elseif kind ~= "arm" and isArm(track) then
@@ -204,6 +228,7 @@ end
 
 function TestTrackReacquisitionReplay:tearDown()
 	env.info = self.info
+	held = false
 end
 
 function TestTrackReacquisitionReplay:test_armsDroppingOutUpTo10s_stayConfirmed_andNoJetTakesTheLabel()
@@ -250,4 +275,53 @@ function TestTrackReacquisitionReplay:test_openWorld_worstCase_fewNewArmsInherit
 	lu.assertTrue(arms >= 20, "too few new ARMs: " .. arms)
 	-- 2 of 87 here (5 without the launch and ARM speed tests).
 	lu.assertTrue(wrong / arms <= 0.03, string.format("%d/%d new ARMs inherited a jet's track", wrong, arms))
+end
+
+-- Tracks silent within the default track memory (30 s), the contacts back as other DCS objects: two looks missed
+-- (here 2 s looks) list a track as lost, then the ARM window applies.
+function TestTrackReacquisitionReplay:test_held_armsSilentUpTo10s_stayConfirmed_andNoJetTakesTheLabel()
+	held = true
+	for _, gap in ipairs({ 5, 10 }) do
+		local n = closedWorld(gap)
+		lu.assertTrue(n.arm >= 40, "too few ARM cases at " .. gap .. " s: " .. n.arm)
+		lu.assertTrue(
+			n.armKept / n.arm >= 0.85,
+			string.format("%d/%d ARMs stayed confirmed at %d s", n.armKept, n.arm, gap)
+		)
+		lu.assertEquals(n.jetArm, 0, "jets or TALDs that inherited an ARM label at " .. gap .. " s")
+	end
+	lu.assertEquals(closedWorld(20).jetArm, 0)
+end
+
+function TestTrackReacquisitionReplay:test_held_onlyArmsAreContinued_aTaldOrJetWaitsForItsOwnObject()
+	-- A held TALD or jet keeps its track for its own DCS object (TrackReacquisition.mayBeTakenWhileHeld): no other
+	-- contact continues it or takes its decoy label.
+	held = true
+	for _, gap in ipairs({ 5, 10 }) do
+		local n = closedWorld(gap)
+		lu.assertTrue(n.tald >= 30, "too few TALD cases: " .. n.tald)
+		lu.assertEquals(n.taldKept, 0)
+		lu.assertEquals(n.otherDecoy, 0)
+		lu.assertEquals(n.wrongTake, 0)
+	end
+end
+
+function TestTrackReacquisitionReplay:test_held_openWorld_noNewContactTakesAHeldJetsTrack()
+	held = true
+	local cues, cueWrong, arms, armWrong = 0, 0, 0, 0
+	for _, gap in ipairs({ 5, 10, 20 }) do
+		for _, newbornsFirst in ipairs({ false, true }) do
+			local n = openWorld(gap, newbornsFirst)
+			cueWrong = cueWrong + n.cueInheritsJet
+			arms, armWrong = arms + n.arm, armWrong + n.armInheritsJet
+			if newbornsFirst then
+				cues = cues + n.cue
+			end
+		end
+	end
+	-- Held jets stay launch-cue parents: weapons first seen with every launcher still silent are cued from them.
+	lu.assertTrue(cues >= 20, "too few launch-cued contacts with the launchers silent: " .. cues)
+	lu.assertEquals(cueWrong, 0)
+	lu.assertTrue(arms >= 20, "too few new ARMs: " .. arms)
+	lu.assertEquals(armWrong, 0)
 end

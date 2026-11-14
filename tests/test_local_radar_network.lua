@@ -539,3 +539,26 @@ function TestLocalRadarNetwork:test_a_sweep_lights_an_uncovered_radar_and_what_i
 	GetTime = getTime
 	assert(ok, err)
 end
+
+-- The poll list is rebuilt every tick (10 Hz) over every battery of the network, so a rebuild that allocates feeds the
+-- garbage collector of the shared mission Lua state on every tick.
+function TestLocalRadarNetwork:test_poll_list_rebuild_allocates_nothing_once_warm()
+	local iads = makeIads()
+	iads._doctrine.BatteryTargetDatalink = true
+	localSensor(iads)
+	for i = 1, 40 do
+		localBattery(iads, BR.SR_SAM, "sam-" .. i, i % 2 == 0 and AS.STATE_HOT or AS.STATE_COLD)
+	end
+	iads:_buildPollList()
+	iads:_buildPollList()
+
+	collectgarbage("collect")
+	collectgarbage("stop")
+	local before = collectgarbage("count")
+	local list = iads:_buildPollList()
+	local allocatedKb = collectgarbage("count") - before
+	collectgarbage("restart")
+
+	lu.assertEquals(#list, 21)
+	lu.assertEquals(allocatedKb, 0)
+end

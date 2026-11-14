@@ -18,7 +18,7 @@
 --   Zone "SAM belt" (circle), properties:
 --     MedusaFlag    = beltweapons    flag "beltweapons" = confirmed ARMs and other weapons inside the zone
 --     MedusaThreats = arms,munitions
---     MedusaLosses  = beltlost       flag "beltlost" = red air-defence sites lost inside the zone (only goes up)
+--     MedusaLosses  = beltlost       flag "beltlost" = red air-defense sites lost inside the zone (only goes up)
 --     MedusaSide    = red
 --
 -- Triggers that read the flags (ordinary editor triggers):

@@ -15,9 +15,10 @@ Three doctrine fields:
 
 **Ground crews and observer posts report what they see according to their Mission Editor skill.** A crew of Average
 skill, the Mission Editor's default for ground units, gets a report out about **one time in four**. So do units
-spawned during the mission and units set to Random or Player skill: they count as the doctrine's
-`CrewSuppression.DefaultCrewSkill` (Average unless you change it). Give your observer posts, and the crews whose reports
-matter, Good, High or Excellent skill.
+spawned during the mission and units set to Random or Player skill: they report as the doctrine's
+`CrewFactorsDefaultSkill`, which is `CrewSuppression.DefaultCrewSkill` (Average) unless you set it. Set
+`CrewFactorsDefaultSkill` to change how such crews report without changing how well they resist suppression. Give your
+observer posts, and the crews whose reports matter, Good, High or Excellent skill.
 
 A group's skill is the best skill among its units. Each network writes one `crew roster` line to dcs.log at start: its
 observer posts and other crews by skill, and how many fell back to the default skill.
@@ -57,9 +58,7 @@ Left out, it follows `Posture`: `HOT_WAR` (the default) gives `ENGAGED`, `WARM_W
 **It only rises on its own:**
 
 - A `SURPRISED` network turns `ALERTED` 2-5 minutes after word first spreads: it first holds a hostile track, a
-  hostile [crew report](local-radars-and-observers.md#observer-reports) gets through, or its
-  [listening stations](esm-listening-stations.md) fix a fire-control radar (or hear fire-control radars on three looks
-  in two minutes).
+  hostile [crew report](local-radars-and-observers.md#observer-reports) gets through.
 - Any network turns `ENGAGED` at its first missile launch, or 30-90 s after it first loses a site (when word of the loss
   arrives).
 
@@ -123,8 +122,7 @@ practising against the network gets an honest measure of the run, never a lucky 
 - return-size estimates carry no noise;
 - every crew report is made and delivered;
 - a report's position is off by its typical error in a fixed direction per post and report (deterministic, not
-  perfect);
-- listening stations catch every radar on every look, with each bearing off by its typical error in a fixed direction.
+  perfect).
 
 DCS's own randomness stays: whether DCS's radars detect a target, missile hits, and AAA fire. Medusa writes
 `DEBRIEF|...|ev=TRAINING_MODE|on=true` at start so the debrief shows the run was a training run.

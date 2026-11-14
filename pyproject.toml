@@ -1,6 +1,6 @@
 [project]
 name = "medusa-bke"
-version = "0.0.1"
+version = "0.1.0"
 description = "Medusa IADS - Black Knight Edition (BKE): the 667th Black Knights / 51st VFW customised fork of Medusa IADS"
 readme = "README.md"
 requires-python = ">=3.13"

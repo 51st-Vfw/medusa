@@ -245,7 +245,7 @@ end
 
 --- True when the ground track is attacking some battery: closing on it, passing within the miss limit, and
 --- arriving within the time-to-go limit (shorter for a slow, coasting track). Height is ignored (a lofted ARM's 3D
---- closest approach stays kilometres off until its final dive).
+--- closest approach stays kilometers off until its final dive).
 local function isAttackingAnyBattery(pos, vel, emitters)
 	local vx, vz = vel.x, vel.z
 	local vhSq = vx * vx + vz * vz
@@ -475,11 +475,16 @@ local evidencePrior = Medusa.Services.HarmDetectionService.evidencePrior
 --- What stops a track being confirmed as an ARM now, or nil. A crew does not call a confident 5 m2 return an ARM
 --- (about 0.08 m2), however ARM-like it flies ("size", Track.sizeClass "large"); nor a contact that appeared beside an
 --- aircraft and has shown no motor ("unpowered", a released store), nor one still being watched for a motor
---- ("window"; Track.Release, Medusa.Constants.Release).
+--- ("window"; Track.Release, Medusa.Constants.Release), nor one that falls like a bomb, will land clear of every
+--- battery and has no more energy than an aircraft near it ("ballistic", observeFall: a store seen too late to link).
 local function confirmBlock(track)
 	local r = track.Release
 	if r and r.Unpowered then
 		return "unpowered"
+	end
+	local h = track.HarmAssessment
+	if h and h.fallsAside then
+		return "ballistic"
 	end
 	if Medusa.Entities.Track.sizeClass(track) == "large" then
 		return "size"
@@ -492,7 +497,7 @@ Medusa.Services.HarmDetectionService.confirmBlock = confirmBlock
 --- `disproved` is set by its flight; then it clears with its score at or below the clear threshold. Other labels
 --- are judged on the kinematic score plus the evidence prior (`state.prior`). A track with a confirm block
 --- (`blockedBy`, confirmBlock) is never confirmed: it may still be SUSPECT or PROBABLE (alert zones see it; point
---- defence engages a released store predicted to fall on the site it protects, PointDefenseService.storeFallsOn; a
+--- defense engages a released store predicted to fall on the site it protects, PointDefenseService.storeFallsOn; a
 --- CLEARED track that would have been confirmed becomes PROBABLE, unless it is aircraft-sized), and an ARM already
 --- confirmed stays so. A block that held back a confirmation is noted in state.blockedBy.
 local function updateLabel(state, now, disproved, blockedBy)
@@ -595,6 +600,116 @@ local function logStateChange(track, previousLabel, state, feat)
 	)
 end
 
+--- Positive aircraft evidence, not typed an ARM: a confident aircraft-sized return, or a crew saw an aircraft or
+--- helicopter.
+local function couldCarry(o)
+	if o.AssessedAircraftType == AAT.HARM then
+		return false
+	end
+	local seen = o.SeenAs
+	return seen == SEEN.AIRCRAFT or seen == SEEN.HELICOPTER or Medusa.Entities.Track.sizeClass(o) == "large"
+end
+
+--- Did an aircraft near `track` (within Release.BALLISTIC_CARRIER_RADIUS_M) have the energy to have dropped it: at
+--- least the track's energy height less BALLISTIC_CARRIER_MARGIN_M at some time in its last PARENT_ENERGY_WINDOW_SEC?
+--- A store never has more energy than its carrier had; a lofted ARM's motor gave it more than any aircraft near it.
+--- Walks `tracks` in place (no allocation).
+local function carrierNear(track, tracks, now)
+	local RB = C.Release
+	local p = track.Position
+	local need = Medusa.Entities.Track.energyHeight(p, track.Velocity) - RB.BALLISTIC_CARRIER_MARGIN_M
+	local r2 = RB.BALLISTIC_CARRIER_RADIUS_M * RB.BALLISTIC_CARRIER_RADIUS_M
+	for i = 1, #tracks do
+		local o = tracks[i]
+		local op = o.Position
+		if o ~= track and op then
+			local dx, dz = op.x - p.x, op.z - p.z
+			if dx * dx + dz * dz <= r2 and couldCarry(o) then
+				local e = Medusa.Entities.Track.maxEnergyHeight(o, RB.PARENT_ENERGY_WINDOW_SEC, now)
+				if e and e >= need then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+--- Is the point (x, z) at least `miss` m from every battery, active or not (a radar shut down against an ARM is still
+--- where the ARM lands)?
+local function clearOfBatteries(x, z, miss, emitters)
+	local m2 = miss * miss
+	local targets = emitters.targets
+	for i = 1, emitters.targetCount do
+		local t = targets[i]
+		local dx, dz = t.x - x, t.z - z
+		if dx * dx + dz * dz < m2 then
+			return false
+		end
+	end
+	return true
+end
+
+--- Does the track fall like a bomb that cannot reach a radar (Medusa.Constants.Release, BALLISTIC_*)? From its last
+--- two looks: its acceleration less gravity, split along its velocity (thrust less drag) and across it (lift). A look
+--- with neither counts; one with either, or where gravity across the velocity is too small to tell lift from none (a
+--- steep dive), starts the count again. A gain along the velocity of BALLISTIC_MOTOR_MPS2 is a motor, for good. After
+--- BALLISTIC_MIN_LOOKS such looks, the fall is carried on from the newest look (gravity and the drag seen, in the
+--- doctrine's ballistic-simulation steps and horizon) to the height of the nearest emitter; `state.fallsAside` is set
+--- when it lands there at least BALLISTIC_MIN_MISS_M from every battery (active or not) and an aircraft near the track
+--- had the energy to have carried it (carrierNear). An ARM coasting without a motor still lands near its radar; a
+--- lofted ARM has more energy than any aircraft near it. No allocation.
+local function observeFall(state, track, tracks, curr, prev, dt, emitters, simDt, simMaxT)
+	local RB = C.Release
+	state.fallsAside = false
+	local cv, pv = curr.velocity, prev.velocity
+	local ax, ay, az = (cv.x - pv.x) / dt, (cv.y - pv.y) / dt + G, (cv.z - pv.z) / dt
+	local vx, vy, vz = (cv.x + pv.x) * 0.5, (cv.y + pv.y) * 0.5, (cv.z + pv.z) * 0.5
+	local v = math.sqrt(vx * vx + vy * vy + vz * vz)
+	if v < 1 then
+		state.fallLooks = 0
+		return
+	end
+	local along = (ax * vx + ay * vy + az * vz) / v
+	if along >= RB.BALLISTIC_MOTOR_MPS2 then
+		state.motorSeen = true
+	end
+	local liftSq = ax * ax + ay * ay + az * az - along * along
+	local maxLift = RB.BALLISTIC_MAX_LIFT_MPS2
+	if
+		state.motorSeen
+		or along > RB.BALLISTIC_MAX_THRUST_MPS2
+		or liftSq > maxLift * maxLift
+		or G * math.sqrt(vx * vx + vz * vz) / v < RB.BALLISTIC_MIN_GCOS_MPS2
+	then
+		state.fallLooks = 0
+		return
+	end
+	local looks = (state.fallLooks or 0) + 1
+	state.fallLooks = looks
+	local nearest = state.emitterPosition
+	if looks < RB.BALLISTIC_MIN_LOOKS or not tracks or not nearest then
+		return
+	end
+	simDt, simMaxT = simDt or 1.0, simMaxT or 120
+	local cp = curr.position
+	local x, y, z, ux, uy, uz = cp.x, cp.y, cp.z, cv.x, cv.y, cv.z
+	-- drag as k u^2, from the deceleration seen at this speed
+	local drag = along < 0 and -along / (ux * ux + uy * uy + uz * uz) or 0
+	local ground = nearest.y
+	for _ = 1, math.ceil(simMaxT / simDt) do
+		if y <= ground then
+			if clearOfBatteries(x, z, RB.BALLISTIC_MIN_MISS_M, emitters) then
+				state.fallsAside = carrierNear(track, tracks, curr.timestamp)
+			end
+			return
+		end
+		local d = drag * math.sqrt(ux * ux + uy * uy + uz * uz) * simDt
+		ux, uy, uz = ux - d * ux, uy - G * simDt - d * uy, uz - d * uz
+		x, y, z = x + ux * simDt, y + uy * simDt, z + uz * simDt
+	end
+end
+
 --- Run one SPRT evaluation cycle for a single track.
 --- This is the per-track workhorse called each tick. It manages the full
 --- lifecycle: creating SPRT state on first sight, gating on minimum scans and
@@ -607,9 +722,10 @@ end
 --- @param ballisticDt number|nil Ballistic sim step size
 --- @param ballisticMaxT number|nil Ballistic sim max steps
 --- @param effectiveMinScans number|nil Minimum scans before an SPRT decision (defaults to HARM_SPRT_MIN_SCANS)
+--- @param tracks table|nil All tracks of the network (aircraft that could have carried a falling store; nil: none)
 --- @return string label Current SPRT label for this track
 --- @return table|nil state The SPRT state table, or nil if track has insufficient data
-local function evaluateTrack(track, emitters, ballisticDt, ballisticMaxT, effectiveMinScans)
+local function evaluateTrack(track, emitters, ballisticDt, ballisticMaxT, effectiveMinScans, tracks)
 	local n = track.PositionHistory:size()
 	if n < 2 then
 		local state = track.HarmAssessment
@@ -673,6 +789,7 @@ local function evaluateTrack(track, emitters, ballisticDt, ballisticMaxT, effect
 
 	state.prevCpa = feat[F_CPA]
 	state.prevTime = curr.timestamp
+	observeFall(state, track, tracks, curr, prev, dt, emitters, ballisticDt, ballisticMaxT)
 	if not state.lastFeat then
 		state.lastFeat = { false, false, false, false, false, false, false, false }
 	end
@@ -749,7 +866,7 @@ function Medusa.Services.HarmDetectionService.assessSingleTrack(
 
 	local previousLabel = track.HarmAssessment and track.HarmAssessment.label
 	emitters = emitters or Medusa.Services.HarmDetectionService.buildEmitterIndex(batteryStore)
-	local label, state = evaluateTrack(track, emitters, ballisticDt, ballisticMaxT)
+	local label, state = evaluateTrack(track, emitters, ballisticDt, ballisticMaxT, nil, tracks)
 
 	if state and state.blockedBy then
 		Medusa.Services.HarmDetectionService._noteBlocked(track, state, networkId)
@@ -832,6 +949,7 @@ function Medusa.Services.HarmDetectionService._noteBlocked(track, state, network
 			state.llr,
 			why == "unpowered" and "it dropped off an aircraft and has no motor"
 				or why == "window" and "it appeared beside an aircraft; watching for a motor"
+				or why == "ballistic" and "it falls like a bomb and will land clear of every battery"
 				or "its return is aircraft-sized"
 		)
 	)

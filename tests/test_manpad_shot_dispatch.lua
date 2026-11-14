@@ -333,19 +333,20 @@ function TestIadsNetworkHandleShot:test_handleShot_regularBattery_doesNotCallOnS
 	lu.assertEquals(iads._rollingPkBuffer[1], 0)
 end
 
-local function withWeaponMocks(target, guidance, fn)
-	local origTarget, origDesc = GetWeaponTarget, GetWeaponDesc
+local function withWeaponTarget(target, fn)
+	local origTarget = GetWeaponTarget
 	GetWeaponTarget = function()
 		return target
 	end
-	GetWeaponDesc = function()
-		return { guidance = guidance }
-	end
 	local ok, err = pcall(fn)
-	GetWeaponTarget, GetWeaponDesc = origTarget, origDesc
+	GetWeaponTarget = origTarget
 	if not ok then
 		error(err, 0)
 	end
+end
+
+local function missileDesc(guidance)
+	return { category = Weapon.Category.MISSILE, guidance = guidance }
 end
 
 function TestIadsNetworkHandleShot:test_missile_shot_is_followed_with_the_track_its_weapon_targets()
@@ -353,8 +354,8 @@ function TestIadsNetworkHandleShot:test_missile_shot_is_followed_with_the_track_
 	local bat = injectBattery(iads, { 330 })
 	iads:getTrackManager()._byNetworkId[777] = "TRK-777"
 	local weapon = { id_ = 9001 }
-	withWeaponMocks({ id_ = 777 }, 4, function()
-		iads:_handleShot(330, "SA-6", weapon)
+	withWeaponTarget({ id_ = 777 }, function()
+		iads:_handleShot(330, "SA-6", weapon, missileDesc(4))
 	end)
 	lu.assertNotNil(bat.MissilesInFlight)
 	local flight = bat.MissilesInFlight[1]
@@ -370,16 +371,124 @@ function TestIadsNetworkHandleShot:test_ir_missile_is_not_crew_guided_and_an_unk
 	local iads = makeIads()
 	local bat = injectBattery(iads, { 331 })
 	bat.CurrentTargetTrackId = "ASSIGNED"
-	withWeaponMocks(nil, 2, function()
-		iads:_handleShot(331, "SA-6", {})
+	withWeaponTarget(nil, function()
+		iads:_handleShot(331, "SA-6", {}, missileDesc(2))
 	end)
 	lu.assertNil(bat.MissilesInFlight[1].TargetTrackId)
 	lu.assertFalse(bat.MissilesInFlight[1].Guided)
 	iads:getTrackManager()._byNetworkId[778] = nil
-	withWeaponMocks({ id_ = 778 }, 4, function() -- a weapon target the network holds no track of
-		iads:_handleShot(331, "SA-6", {})
+	withWeaponTarget({ id_ = 778 }, function() -- a weapon target the network holds no track of
+		iads:_handleShot(331, "SA-6", {}, missileDesc(4))
 	end)
 	lu.assertNil(bat.MissilesInFlight[2].TargetTrackId)
+end
+
+local function injectNetworkedAaa(iads, gunUnitId, radarUnitId, shellTypeName)
+	local batteryStore = iads:getAssetIndex():batteries()
+	local id = nextSeq()
+	local bat = Medusa.Entities.Battery.new({
+		NetworkId = "test-net",
+		GroupId = id * 100,
+		GroupName = string.format("aaa-group-%d", id),
+		Role = Medusa.Constants.BatteryRole.AAA,
+		ActivationState = Medusa.Constants.ActivationState.STATE_HOT,
+	})
+	bat.DetectionRangeMax = 20000
+	local radar = makeUnit(radarUnitId, Medusa.Constants.BatteryUnitRole.SEARCH_RADAR, "none")
+	radar.AmmoTypes = {}
+	bat.Units = { makeUnit(gunUnitId, Medusa.Constants.BatteryUnitRole.AAA, shellTypeName), radar }
+	Medusa.Entities.Battery.recomputeState(bat)
+	batteryStore:add(bat)
+	return bat
+end
+
+-- A DCS weapon object: reading it after the object has ended throws, as Weapon.getDesc does in DCS.
+local function dcsWeapon(typeName, desc)
+	local w = { gone = false, descReads = 0 }
+	function w:getTypeName()
+		return typeName
+	end
+	function w:getDesc()
+		self.descReads = self.descReads + 1
+		if self.gone then
+			error("Weapon doesn't exist")
+		end
+		return desc
+	end
+	function w:getTarget()
+		return nil
+	end
+	return w
+end
+
+local function publishShot(unitId, weapon)
+	HarnessWorldEventBus:publish({
+		id = world.event.S_EVENT_SHOT,
+		weapon = weapon,
+		initiator = {
+			uid = unitId,
+			getCoalition = function()
+				return COAL_RED
+			end,
+		},
+	})
+end
+
+local function withUnitIds(fn)
+	local origGetUnitID = GetUnitID
+	GetUnitID = function(u)
+		return u.uid
+	end
+	local ok, err = pcall(fn)
+	GetUnitID = origGetUnitID
+	if not ok then
+		error(err, 0)
+	end
+end
+
+function TestIadsNetworkHandleShot:test_networked_aaa_shell_is_not_a_decoy_response_launch()
+	-- A gun shell is no missile the crew follows; it may already have ended when the shot queue is handled.
+	local iads = makeIads()
+	local bat = injectNetworkedAaa(iads, 340, 341, "weapons.shells.53-UOR-281U")
+	lu.assertFalse(Medusa.Entities.Battery.isIndependentAaa(bat), "fixture: a network-run AAA battery")
+	local shell = dcsWeapon("weapons.shells.53-UOR-281U", { category = Weapon.Category.SHELL })
+	withUnitIds(function()
+		publishShot(340, shell)
+		shell.gone = true
+		local reads = shell.descReads
+		iads:_processShotEvents(10)
+		lu.assertEquals(shell.descReads, reads, "no descriptor read once the shell may be gone")
+	end)
+	lu.assertEquals(bat.ShotsFired, 1)
+	lu.assertTrue(bat.MissilesInFlight == nil or #bat.MissilesInFlight == 0)
+end
+
+function TestIadsNetworkHandleShot:test_a_shell_known_only_by_its_descriptor_is_not_a_decoy_response_launch()
+	local iads = makeIads()
+	local bat = injectNetworkedAaa(iads, 343, 344, "KS-19 shell")
+	local shell = dcsWeapon("KS-19 shell", { category = Weapon.Category.SHELL })
+	withUnitIds(function()
+		publishShot(343, shell)
+		iads:_processShotEvents(10)
+	end)
+	lu.assertEquals(shell.descReads, 1, "read once, at the event")
+	lu.assertEquals(bat.ShotsFired, 1)
+	lu.assertTrue(bat.MissilesInFlight == nil or #bat.MissilesInFlight == 0)
+end
+
+function TestIadsNetworkHandleShot:test_missile_descriptor_is_read_when_the_shot_event_arrives()
+	local iads = makeIads()
+	local bat = injectBattery(iads, { 342 })
+	local missile = dcsWeapon("SA-6", { category = Weapon.Category.MISSILE, guidance = 4 })
+	withUnitIds(function()
+		publishShot(342, missile)
+		lu.assertEquals(missile.descReads, 1, "read at the event")
+		iads:_processShotEvents(10)
+	end)
+	lu.assertEquals(missile.descReads, 1, "not read again when the queue is handled")
+	lu.assertEquals(#bat.MissilesInFlight, 1)
+	lu.assertIs(bat.MissilesInFlight[1].Weapon, missile)
+	lu.assertTrue(bat.MissilesInFlight[1].Guided)
 end
 
 function TestIadsNetworkHandleShot:test_stopping_the_network_releases_the_decoy_response()
@@ -409,8 +518,8 @@ function TestIadsNetworkHandleShot:test_no_flight_bookkeeping_when_decoy_assessm
 	local iads = makeIads()
 	iads._doctrine.DecoyAssessment = false
 	local bat = injectBattery(iads, { 332 })
-	withWeaponMocks({ id_ = 777 }, 4, function()
-		iads:_handleShot(332, "SA-6", {})
+	withWeaponTarget({ id_ = 777 }, function()
+		iads:_handleShot(332, "SA-6", {}, missileDesc(4))
 	end)
 	lu.assertNil(bat.MissilesInFlight)
 end
@@ -424,6 +533,54 @@ function TestIadsNetworkHandleShot:test_independentAaaShotDoesNotAffectRollingPk
 	lu.assertEquals(bat.ShotsFired, 1)
 	lu.assertEquals(bat.TotalAmmoStatus, 1)
 	lu.assertEquals(iads._rollingPkCount, 0)
+end
+
+function TestIadsNetworkHandleShot:test_networked_aaa_gunfire_leaves_the_rolling_pk_alone()
+	-- The rolling Pk is a kill rate per missile; a gun burst is many shells and no missile.
+	local iads = makeIads()
+	iads._doctrine.RollingPkEnabled = true
+	local bat = injectNetworkedAaa(iads, 350, 351, "weapons.shells.53-UOR-281U")
+	local gun = bat.Units[1]
+	gun.AmmoCount, gun.AmmoTypes[1].Count = 40, 40
+	Medusa.Entities.Battery.recomputeState(bat)
+	local floorBefore = iads._effectivePkFloor
+	local shots = Medusa.Constants.ROLLING_PK_WINDOW + 2
+	for _ = 1, shots do
+		iads:_handleShot(350, "weapons.shells.53-UOR-281U")
+	end
+	lu.assertEquals(bat.ShotsFired, shots)
+	lu.assertEquals(bat.LastShotTime, 1000)
+	lu.assertEquals(iads._rollingPkCount, 0)
+	lu.assertEquals(iads._effectivePkFloor, floorBefore)
+	lu.assertNil(bat.MissileInFlightUntil, "a shell needs no guidance once fired")
+end
+
+function TestIadsNetworkHandleShot:test_gun_shells_do_not_spend_a_last_chance_salvo()
+	-- The salvo counts missiles; a gun's last chance runs on its hold-down window instead.
+	local iads = makeIads()
+	local bat = injectNetworkedAaa(iads, 355, 356, "weapons.shells.53-UOR-281U")
+	local gun = bat.Units[1]
+	gun.AmmoCount, gun.AmmoTypes[1].Count = 40, 40
+	Medusa.Entities.Battery.recomputeState(bat)
+	Medusa.Entities.Battery.beginLastChance(bat, "TRK-1", 15)
+	for _ = 1, Medusa.Constants.LAST_CHANCE_SALVO_COUNT + 1 do
+		iads:_handleShot(355, "weapons.shells.53-UOR-281U")
+	end
+	lu.assertEquals(bat.LastChanceShotsRemaining, Medusa.Constants.LAST_CHANCE_SALVO_COUNT)
+	lu.assertEquals(bat.LastChanceTrackId, "TRK-1")
+end
+
+function TestIadsNetworkHandleShot:test_networkedAaaKillDoesNotCompleteRegularBatteryShot()
+	local iads = makeIads()
+	injectBattery(iads, { 352 })
+	injectNetworkedAaa(iads, 353, 354, "weapons.shells.53-UOR-281U")
+	iads:_handleShot(352, "SA-6")
+
+	iads._killQueue:enqueue({ _unitId = 353 })
+	iads:_processKillEvents(1)
+
+	lu.assertEquals(iads._rollingPkCount, 1)
+	lu.assertEquals(iads._rollingPkBuffer[1], 0)
 end
 
 function TestIadsNetworkHandleShot:test_a_missile_launch_makes_a_surprised_network_engaged_but_gunfire_does_not()
@@ -630,6 +787,227 @@ function TestIadsNetworkHandleShot:test_independentAaaKillDoesNotCompleteRegular
 	lu.assertEquals(iads._rollingPkBuffer[1], 0)
 end
 
+-- An SA-6 site with a Shilka and its tracking radar: a SAM-role battery that also carries a gun. The shell names
+-- stand in for whatever the gun's ammunition descriptors give.
+local KUB_TYPE, KUB_NAME = "SA3M9M", "3M9M Kub (SA-6 Gainful)"
+local GUN_SHELL_TYPE, GUN_SHELL_NAME = "weapons.shells.2A7_23_HE", "23mm HE"
+
+local function injectSamSiteWithGun(iads, launcherId, gunId, radarId)
+	local BUR = Medusa.Constants.BatteryUnitRole
+	local bat = makeRegularBattery()
+	bat.Role = Medusa.Constants.BatteryRole.SR_SAM
+	bat.ShotsFired = 0
+	local launcher = makeUnit(launcherId, BUR.LAUNCHER, KUB_TYPE)
+	launcher.AmmoTypes[1].WeaponDisplayName = KUB_NAME
+	local gun = Medusa.Entities.Battery.newUnit({
+		UnitId = gunId,
+		Roles = { BUR.AAA },
+		GunNames = { [GUN_SHELL_TYPE] = true, [GUN_SHELL_NAME] = true },
+	})
+	local radar = Medusa.Entities.Battery.newUnit({ UnitId = radarId, Roles = { BUR.TRACK_RADAR } })
+	bat.Units = { launcher, gun, radar }
+	Medusa.Entities.Battery.recomputeState(bat)
+	iads:getAssetIndex():batteries():add(bat)
+	return bat
+end
+
+local function killBy(iads, unitId, weaponName)
+	iads._killQueue:enqueue({ _unitId = unitId, weapon_name = weaponName })
+	iads:_processKillEvents(1)
+end
+
+function TestIadsNetworkHandleShot:test_a_gun_kill_in_a_sam_site_is_not_a_missile_hit()
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 360, 361, 362)
+	iads:_handleShot(360, KUB_TYPE)
+
+	killBy(iads, 361, GUN_SHELL_NAME)
+
+	lu.assertEquals(iads._rollingPkCount, 1)
+	lu.assertEquals(iads._rollingPkBuffer[1], 0)
+end
+
+function TestIadsNetworkHandleShot:test_a_gun_kill_named_by_the_shell_type_is_not_a_missile_hit()
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 380, 381, 382)
+	iads:_handleShot(380, KUB_TYPE)
+
+	killBy(iads, 381, GUN_SHELL_TYPE)
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 0)
+end
+
+function TestIadsNetworkHandleShot:test_the_kill_line_names_the_weapon_only_when_dcs_gives_one()
+	local iads = makeIads()
+	local bat = injectSamSiteWithGun(iads, 386, 387, 388)
+	local lines = {}
+	local logger = iads._logger
+	local original = logger.info
+	logger.info = function(_, msg)
+		lines[#lines + 1] = msg
+	end
+	local ok, err = pcall(function()
+		killBy(iads, 386, KUB_NAME)
+		killBy(iads, 386, nil)
+	end)
+	logger.info = original
+	lu.assertTrue(ok, tostring(err))
+
+	lu.assertEquals(lines[1], "battery " .. bat.GroupName .. " scored a kill (" .. KUB_NAME .. ")")
+	lu.assertEquals(lines[2], "battery " .. bat.GroupName .. " scored a kill")
+end
+
+function TestIadsNetworkHandleShot:test_a_kill_by_a_name_the_site_does_not_know_is_a_hit()
+	-- Only a name the battery's guns carry makes a gun kill: a missile named some other way still counts.
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 383, 384, 385)
+	iads:_handleShot(383, KUB_TYPE)
+
+	killBy(iads, 383, "a name neither the guns nor the missiles carry")
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 1)
+end
+
+function TestIadsNetworkHandleShot:test_a_kill_by_a_short_missile_name_is_a_hit()
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 386, 387, 388)
+	iads:_handleShot(386, KUB_TYPE)
+
+	killBy(iads, 388, "3M9M")
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 1)
+end
+
+function TestIadsNetworkHandleShot:test_a_missile_kill_reported_by_the_guiding_radar_is_a_hit()
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 363, 364, 365)
+	iads:_handleShot(363, KUB_TYPE)
+
+	killBy(iads, 365, KUB_NAME)
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 1)
+end
+
+function TestIadsNetworkHandleShot:test_the_last_missiles_kill_is_a_hit()
+	-- The kill arrives after the launch spent the round, so the cached count is already zero.
+	local iads = makeIads()
+	local bat = injectSamSiteWithGun(iads, 366, 367, 368)
+	iads:_handleShot(366, KUB_TYPE)
+	iads:_handleShot(366, KUB_TYPE)
+	lu.assertEquals(bat.Units[1].AmmoTypes[1].Count, 0)
+
+	killBy(iads, 366, KUB_NAME)
+
+	lu.assertEquals(iads._rollingPkBuffer[2], 1)
+end
+
+function TestIadsNetworkHandleShot:test_a_kill_named_by_the_missile_type_is_a_hit()
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 369, 370, 371)
+	iads:_handleShot(369, KUB_TYPE)
+
+	killBy(iads, 369, KUB_TYPE)
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 1)
+end
+
+function TestIadsNetworkHandleShot:test_an_unnamed_kill_in_a_site_with_a_gun_is_a_hit()
+	local iads = makeIads()
+	injectSamSiteWithGun(iads, 372, 373, 374)
+	iads:_handleShot(372, KUB_TYPE)
+
+	killBy(iads, 373, nil)
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 1)
+end
+
+function TestIadsNetworkHandleShot:test_any_kill_of_a_site_without_a_gun_is_a_hit()
+	local iads = makeIads()
+	injectBattery(iads, { 375 })
+	iads:_handleShot(375, "SA-6")
+
+	killBy(iads, 375, "a name the battery's ammo does not carry")
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 1)
+end
+
+-- A Tunguska: one launcher unit with missiles and guns, whose cached ammo holds only the missiles.
+local TUNGUSKA_SHELL_TYPE, TUNGUSKA_SHELL_NAME = "weapons.shells.2A38_30_HE", "30mm HE"
+
+local function injectGunMissileLauncher(iads, unitId)
+	local bat = injectBattery(iads, { unitId })
+	bat.Units[1].GunNames = { [TUNGUSKA_SHELL_TYPE] = true, [TUNGUSKA_SHELL_NAME] = true }
+	return bat
+end
+
+function TestIadsNetworkHandleShot:test_a_gun_missile_units_cannon_kill_is_not_a_missile_hit()
+	local iads = makeIads()
+	injectGunMissileLauncher(iads, 389)
+	iads:_handleShot(389, "SA-6")
+
+	killBy(iads, 389, TUNGUSKA_SHELL_NAME)
+
+	lu.assertEquals(iads._rollingPkBuffer[1], 0)
+end
+
+local function captureErrors(iads, fn)
+	local errors = {}
+	local logger = iads._logger
+	local original = logger.error
+	logger.error = function(_, msg)
+		errors[#errors + 1] = msg
+	end
+	local ok, err = pcall(fn)
+	logger.error = original
+	lu.assertTrue(ok, tostring(err))
+	return errors
+end
+
+function TestIadsNetworkHandleShot:test_a_gun_missile_units_shell_spends_no_missile_and_is_no_launch()
+	local R = Medusa.Constants.Readiness
+	local iads = makeIads()
+	local bat = injectGunMissileLauncher(iads, 376)
+	iads._crew.readiness = R.SURPRISED
+
+	local errors = captureErrors(iads, function()
+		iads:_handleShot(376, TUNGUSKA_SHELL_TYPE)
+	end)
+
+	lu.assertEquals(#errors, 0)
+	lu.assertEquals(bat.Units[1].AmmoCount, 2)
+	lu.assertEquals(bat.Units[1].AmmoTypes[1].Count, 2)
+	lu.assertEquals(bat.ShotsFired, 0)
+	lu.assertEquals(iads:getReadiness(), R.SURPRISED)
+	lu.assertEquals(Medusa.Services.CrewFactorsService.missilesInFlight(iads._crew, 1000), 0)
+end
+
+function TestIadsNetworkHandleShot:test_a_shell_known_by_its_descriptor_spends_no_missile()
+	local iads = makeIads()
+	local bat = injectGunMissileLauncher(iads, 377)
+
+	local errors = captureErrors(iads, function()
+		iads:_handleShot(377, "GSh_30", nil, { category = Weapon.Category.SHELL })
+	end)
+
+	lu.assertEquals(#errors, 0)
+	lu.assertEquals(bat.Units[1].AmmoCount, 2)
+	lu.assertEquals(Medusa.Services.CrewFactorsService.missilesInFlight(iads._crew, 1000), 0)
+end
+
+function TestIadsNetworkHandleShot:test_a_shell_from_a_sam_units_ammo_is_no_crew_launch()
+	local R = Medusa.Constants.Readiness
+	local iads = makeIads()
+	local bat = injectBattery(iads, { 378 })
+	local shell = "weapons.shells.2A38_30_HE"
+	table.insert(bat.Units[1].AmmoTypes, { WeaponTypeName = shell, Count = 10, RangeMax = 4000 })
+	iads._crew.readiness = R.SURPRISED
+
+	iads:_handleShot(378, shell)
+
+	lu.assertEquals(iads:getReadiness(), R.SURPRISED)
+	lu.assertEquals(Medusa.Services.CrewFactorsService.missilesInFlight(iads._crew, 1000), 0)
+end
+
 -- ============================================================
 -- 3. IadsNetwork._handleUnitDeath MANPAD guard
 -- ============================================================
@@ -828,6 +1206,7 @@ function TestIadsNetworkManpadAssignmentCue:test_every_target_assignment_cues_ma
 			end,
 			MS = {
 				observe = function() end,
+				observeDuration = function() end,
 				inc = function() end,
 			},
 		})

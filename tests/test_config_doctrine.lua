@@ -542,20 +542,35 @@ function TestGetDoctrine:test_crew_factors_on_and_training_mode_off_by_default()
 	lu.assertTrue(set.TrainingMode)
 end
 
-function TestDoctrineScanRates:test_unknown_scan_rate_and_esm_keys_are_reported()
+function TestDoctrineScanRates:test_unknown_scan_rate_keys_are_reported()
 	withTrackMemory(30)
-	local d = Medusa.Entities.Doctrine.new({
-		ScanUpdateRateSec = { EWR = 8, SAM_TRAK = 1 },
-		ESM = { MaxRangeKm = 200, BearingSigma = 3 },
-	})
+	local d = Medusa.Entities.Doctrine.new({ ScanUpdateRateSec = { EWR = 8, SAM_TRAK = 1 } })
 	lu.assertEquals(d.ScanRates.EWR, 8)
-	lu.assertEquals(d.ScanRates.SAM_TRACK, 2) -- the misspelt key is ignored
-	lu.assertEquals(d.ESM.MaxRangeKm, 200)
-	lu.assertEquals(d.ESM.BearingSigmaDeg, Medusa.Constants.Esm.DEFAULT_BEARING_SIGMA_DEG)
+	lu.assertEquals(d.ScanRates.SAM_TRACK, 2) -- the misspelled key is ignored
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "ScanUpdateRateSec.SAM_TRAK")
+end
+
+function TestDoctrineScanRates:test_the_removed_listening_station_fields_are_ignored_with_one_notice()
+	withTrackMemory(30)
+	local d = Medusa.Entities.Doctrine.new({ PassiveDetection = true, ESM = { MaxRangeKm = 200, Typo = 1 } })
+	lu.assertNil(d.PassiveDetection)
+	lu.assertNil(d.ESM)
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "PassiveDetection")
+	lu.assertStrContains(self.errors[1], "ESM")
+	lu.assertStrContains(self.errors[1], "removed")
+	lu.assertNotStrContains(self.errors[1], "unknown")
+	Medusa.Entities.Doctrine.new({ ESM = {} })
 	lu.assertEquals(#self.errors, 2)
-	local all = self.errors[1] .. self.errors[2]
-	lu.assertStrContains(all, "ScanUpdateRateSec.SAM_TRAK")
-	lu.assertStrContains(all, "ESM.BearingSigma")
+	lu.assertStrContains(self.errors[2], "removed")
+	Medusa.Entities.Doctrine.new({})
+	lu.assertEquals(#self.errors, 2)
+	-- a misspelled key is not pointed at a removed field
+	Medusa.Entities.Doctrine.new({ esm = {} })
+	lu.assertEquals(#self.errors, 3)
+	lu.assertStrContains(self.errors[3], "'esm'")
+	lu.assertNotStrContains(self.errors[3], "did you mean")
 end
 
 function TestDoctrineScanRates:test_fire_discipline_without_engage_air_weapons_management_is_reported()
@@ -566,4 +581,118 @@ function TestDoctrineScanRates:test_fire_discipline_without_engage_air_weapons_m
 	Medusa.Entities.Doctrine.new({ ManageEngageAirWeapons = false, DecoyFireDiscipline = false })
 	Medusa.Entities.Doctrine.new({})
 	lu.assertEquals(#self.errors, 1)
+end
+
+function TestDoctrineScanRates:test_an_unknown_top_level_key_is_reported_by_name()
+	withTrackMemory(30)
+	local d = Medusa.Entities.Doctrine.new({ Readyness = "SURPRISED", ROE = "FREE", [1] = "HOLD" })
+	lu.assertEquals(d.ROE, "FREE")
+	lu.assertEquals(d.Readiness, Medusa.Constants.Readiness.ENGAGED) -- the misspelled field is ignored
+	lu.assertEquals(#self.errors, 2)
+	local all = self.errors[1] .. self.errors[2]
+	lu.assertStrContains(all, "'Readyness'")
+	lu.assertStrContains(all, "'1'")
+end
+
+function TestDoctrineScanRates:test_a_key_differing_only_in_case_names_the_field_it_resembles()
+	withTrackMemory(30)
+	Medusa.Entities.Doctrine.new({ roe = "FREE" })
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "'roe'")
+	lu.assertStrContains(self.errors[1], "'ROE'")
+end
+
+function TestDoctrineScanRates:test_known_sub_tables_aliases_and_the_doctrine_id_are_not_reported()
+	withTrackMemory(30)
+	local d = Medusa.Entities.Doctrine.new({
+		DoctrineId = "fixed",
+		MANPADAlertnessDecaySec = 600,
+		MANPADFieldRadioRangeM = 2000,
+		MANPAD = { AudioRangeM = Medusa.Constants.Manpad.AUDIO_RANGE_MIN_M },
+		AAA = { BarrageChance = 0.5 },
+		CrewSuppression = { Enabled = false },
+		EMCON = { LR_SAM = "MINIMIZE" },
+		AllowedAirbases = { "Kutaisi" },
+		LaunchCriteria = {},
+	})
+	lu.assertEquals(d.DoctrineId, "fixed")
+	lu.assertEquals(d.MANPAD.AlertnessDecaySec, 600)
+	lu.assertEquals(#self.errors, 0)
+end
+
+function TestDoctrineScanRates:test_a_number_field_given_something_else_is_an_error_and_takes_its_default()
+	withTrackMemory(30)
+	local d =
+		Medusa.Entities.Doctrine.new({ PkFloor = "high", FlightSize = true, GCIRangeKm = "far", HoldDownSec = "20" })
+	lu.assertEquals(d.PkFloor, 0.25)
+	lu.assertEquals(d.FlightSize, 1)
+	lu.assertNil(d.GCIRangeKm)
+	lu.assertEquals(d.HoldDownSec, 20) -- a numeric string still works and is not reported
+	lu.assertEquals(#self.errors, 3)
+	local all = self.errors[1] .. self.errors[2] .. self.errors[3]
+	lu.assertStrContains(all, "'PkFloor' value 'high'")
+	lu.assertStrContains(all, "'FlightSize' value 'true'")
+	lu.assertStrContains(all, "'GCIRangeKm' value 'far'")
+end
+
+function TestDoctrineScanRates:test_a_nan_number_field_is_an_error_and_takes_its_default()
+	withTrackMemory(30)
+	local d = Medusa.Entities.Doctrine.new({ TargetKillRate = 0 / 0 })
+	lu.assertEquals(d.TargetKillRate, 0.5)
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "TargetKillRate")
+end
+
+function TestDoctrineScanRates:test_report_skill_follows_crew_suppression_skill_unless_set()
+	withTrackMemory(30)
+	local S = Medusa.Constants.CrewSkill
+	lu.assertEquals(Medusa.Entities.Doctrine.new({}).CrewFactorsDefaultSkill, S.AVERAGE)
+	local follows = Medusa.Entities.Doctrine.new({ CrewSuppression = { DefaultCrewSkill = "GOOD" } })
+	lu.assertEquals(follows.CrewFactorsDefaultSkill, S.GOOD)
+	local apart = Medusa.Entities.Doctrine.new({
+		CrewFactorsDefaultSkill = "HIGH",
+		CrewSuppression = { DefaultCrewSkill = "EXCELLENT" },
+	})
+	lu.assertEquals(apart.CrewFactorsDefaultSkill, S.HIGH)
+	lu.assertEquals(apart.CrewSuppression.DefaultCrewSkill, S.EXCELLENT)
+	lu.assertEquals(#self.errors, 0)
+	-- a value that is not a skill is an error and follows the crew-suppression skill
+	local invalid = Medusa.Entities.Doctrine.new({
+		CrewFactorsDefaultSkill = "Random",
+		CrewSuppression = { DefaultCrewSkill = "GOOD" },
+	})
+	lu.assertEquals(invalid.CrewFactorsDefaultSkill, S.GOOD)
+	lu.assertEquals(#self.errors, 1)
+	lu.assertStrContains(self.errors[1], "CrewFactorsDefaultSkill")
+	lu.assertStrContains(self.errors[1], "CrewSuppression.DefaultCrewSkill")
+end
+
+-- == [BKE] MEDUSA_CONFIG.PointDefense ties ==
+
+TestPointDefenseTiesConfig = {}
+
+function TestPointDefenseTiesConfig:setUp()
+	Medusa.Config.Current = nil
+end
+
+function TestPointDefenseTiesConfig:tearDown()
+	MEDUSA_CONFIG = nil
+	Medusa.Config.Current = nil
+end
+
+function TestPointDefenseTiesConfig:test_no_ties_by_default()
+	MEDUSA_CONFIG = nil
+	lu.assertEquals(Medusa.Config:getPointDefenseTies(), {})
+end
+
+function TestPointDefenseTiesConfig:test_keeps_name_pairs_and_drops_the_rest()
+	MEDUSA_CONFIG = {
+		PointDefense = { ["iads.pd tor"] = "iads.sa10", ["iads.pd 2"] = 5, [3] = "iads.sa11", [""] = "x" },
+	}
+	lu.assertEquals(Medusa.Config:getPointDefenseTies(), { ["iads.pd tor"] = "iads.sa10" })
+end
+
+function TestPointDefenseTiesConfig:test_not_a_table_gives_no_ties()
+	MEDUSA_CONFIG = { PointDefense = "iads.sa10" }
+	lu.assertEquals(Medusa.Config:getPointDefenseTies(), {})
 end

@@ -5,7 +5,7 @@ From an empty mission to a working Black Knight Edition IADS in a few minutes. T
 
 ## Minimal set-up
 
-1. Place your air defence groups in the Mission Editor and give each group a name that starts with `iads` (the default
+1. Place your air defense groups in the Mission Editor and give each group a name that starts with `iads` (the default
    prefix), for example `iads.north.sa10` or `iads SA-6 Hama`. No role token is needed for SAM, AAA or MANPAD groups:
    Medusa works out what each group is from its units. Early-warning radars are found the same way (or name them with
    `ewr`). See [Naming conventions](naming-conventions.md).
@@ -15,14 +15,13 @@ From an empty mission to a working Black Knight Edition IADS in a few minutes. T
 
 That is all a mission needs. Everything below is optional.
 
-## [BKE] Ground sensors in two names
+## [BKE] Observer posts and local cueing radars
 
-BKE adds two kinds of ground group you can place, each marked by a token in its name:
+BKE adds a kind of ground group you can place, marked by a token in its name:
 
 | Name | What it is |
 |---|---|
 | `iads.north.obs.hill-412` | An **observer post** (`obs` or `observer`): a few soldiers or a lookout vehicle that watch for aircraft and radio coarse reports ([page](local-radars-and-observers.md#observer-reports)) |
-| `iads.north.esm.ridge-1` | A **listening station** (`esm` or `elint`): a vehicle or two that take bearings on hostile aircraft radars ([page](esm-listening-stations.md)) |
 
 Give observer posts a skill above Average in the editor: an Average crew gets a report out about one time in four
 ([Crews, readiness and training mode](crews-and-readiness.md)).
@@ -77,11 +76,10 @@ After the first run, look in `dcs.log`:
 
 | Look for | It means |
 |---|---|
-| `Medusa IADS - Black Knight Edition (BKE) v0.0.1 (based on Medusa v1.6.0)` | BKE loaded |
+| `Medusa IADS - Black Knight Edition (BKE) v0.1.0 (based on Medusa v1.6.0)` | BKE loaded |
 | `ERROR` lines from `Doctrine` or `Config` | A value in your configuration was rejected; the line says what was used instead |
 | `crew roster of network ...` | **[BKE]** Your observer posts and crews, with their skill and how many fell back to the default skill |
 | `local radar <group>: reach ...` | **[BKE]** A radar became a local cueing radar. If it was meant to be your early-warning radar, add `ewr` to its name |
-| `listening stations: <n> (...)` | **[BKE]** Your listening stations were found |
 | `DEBRIEF\|...` | **[BKE]** The after-action log of what the network saw and did ([Debrief log](debrief-log.md)) |
 
 ## Next steps

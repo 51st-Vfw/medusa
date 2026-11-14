@@ -146,7 +146,7 @@ function TestDecoyRecordedFlights:test_tald_without_a_confident_size_is_not_labe
 	lu.assertNil(suspectAt)
 end
 
--- == Behaviour ==
+-- == Behavior ==
 
 TestDecoyBehaviour = {}
 

@@ -15,13 +15,23 @@ require("services.HarmDetectionService")
 
 local mockTime = 1000
 
+local ulidCounter = 0
+local uniqueCounter = 0
+
+local function nextUnique()
+	uniqueCounter = uniqueCounter + 1
+	return uniqueCounter
+end
+
 local function setupMocks()
 	mockTime = 1000
 	GetTime = function()
 		return mockTime
 	end
+	ulidCounter = 0
 	NewULID = function()
-		return string.format("ULID-%d", math.random(1, 999999))
+		ulidCounter = ulidCounter + 1
+		return string.format("ULID-%d", ulidCounter)
 	end
 end
 
@@ -42,7 +52,7 @@ local function makeTrack(overrides)
 	local base = {
 		Position = { x = 1000, y = 5000, z = 2000 },
 		Velocity = { x = 300, y = -30, z = 150 },
-		NetworkId = overrides and overrides.NetworkId or string.format("net-%d", math.random(1, 999999)),
+		NetworkId = overrides and overrides.NetworkId or string.format("net-%d", nextUnique()),
 	}
 	if overrides then
 		for k, v in pairs(overrides) do
@@ -55,8 +65,8 @@ end
 local function makeBattery(overrides)
 	local base = {
 		NetworkId = 1,
-		GroupId = overrides and overrides.GroupId or math.random(1, 999999),
-		GroupName = overrides and overrides.GroupName or string.format("SAM-%d", math.random(1, 999999)),
+		GroupId = overrides and overrides.GroupId or nextUnique(),
+		GroupName = overrides and overrides.GroupName or string.format("SAM-%d", nextUnique()),
 		OperationalStatus = "ACTIVE",
 		ActivationState = "STATE_WARM",
 		Position = { x = 5000, y = 0, z = 5000 },
@@ -550,7 +560,7 @@ function TestEvaluateTrack:test_confirmed_arm_flying_at_a_radar_that_shut_down_s
 	end
 end
 
--- A lofted ARM high above its ground track toward the radar is attacking it (3D closest approach is kilometres off).
+-- A lofted ARM high above its ground track toward the radar is attacking it (3D closest approach is kilometers off).
 function TestEvaluateTrack:test_lofted_arm_over_its_ground_track_is_attacking()
 	local store = makeBatteryStoreAndGrid({
 		makeBattery({ ActivationState = "STATE_HOT", Position = { x = 60000, y = 0, z = 0 } }),

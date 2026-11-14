@@ -15,7 +15,7 @@ require("core.Constants")
     - Parses a DCS group name that follows the dot-echelon naming convention into structured data.
     - Extracts the managed prefix, roles (GCI, EWR, HQ, AWACS, OBSERVER), hierarchy path, and a human label.
       OBSERVER ("obs", "observer" or Roles.OBSERVER) marks an observer post: a group whose crew radios what it sees.
-      ESM ("esm", "elint" or Roles.ESM) marks a listening station: a group that takes bearings on aircraft radars.
+      ESM ("esm", "elint" or Roles.ESM) marks a former listening station, kept so such a group stays a lookout post.
     - Supports both exact and prefix-style role matching for backward compatibility.
 
     How others use it
@@ -76,7 +76,7 @@ local function isObserverToken(seg, configToken)
 	return configToken and segmentMatchesToken(seg, configToken)
 end
 
---- Listening station token ("esm", "elint" or the configured Roles.ESM).
+--- Former listening station token ("esm", "elint" or the configured Roles.ESM).
 local function isEsmToken(seg, configToken)
 	for alias in pairs(ESM_ALIASES) do
 		if segmentMatchesToken(seg, alias) then

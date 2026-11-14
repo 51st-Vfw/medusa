@@ -1,6 +1,6 @@
--- [BKE] Ground sensors: observer posts, local cueing radars and ESM listening stations.
+-- [BKE] Ground sensors: observer posts and local cueing radars.
 -- Put this in a DO SCRIPT action that runs before the DO SCRIPT FILE that loads medusa-bke.lua.
--- See docs/local-radars-and-observers.md and docs/esm-listening-stations.md.
+-- See docs/local-radars-and-observers.md.
 --
 -- Group names to use in the Mission Editor (prefix "north" below):
 --
@@ -13,17 +13,13 @@
 --   north.zsu.dogear-shilka     a Dog Ear with Shilkas: an AAA battery directed by its radar
 --   north.igla.dogear           a Dog Ear with Igla teams: MANPAD teams cued by their radar
 --   north.ewr.dogear-west       a Dog Ear with the ewr token: an always-on early-warning radar, as in stock Medusa
---   north.esm.ridge-1           listening station: one or two trucks or a command vehicle, nothing else.
---   north.esm.ridge-2           Place at least three stations 30-60 km apart, not in a line, on high ground,
---   north.elint.valley-3        with a clear view towards where the enemy flies.
---   north.esm.obs.ridge-4       a listening station whose crew is also a trained observer post
 --
--- A network whose only radar is a lone Dog Ear is blind until the Dog Ear comes up: SAMAsEWR = "WHEN_NO_EWR" still
--- counts the dark Dog Ear as its radar. Add an early-warning radar, name the Dog Ear with ewr, or set SAMAsEWR =
--- "ALWAYS" (below).
+-- A cueing Dog Ear is not an early-warning radar: with SAMAsEWR = "WHEN_NO_EWR" (the default) a network whose only
+-- radar is a lone, unnamed Dog Ear uses its long- and medium-range SAMs as early-warning radars. SAMAsEWR = "ALWAYS"
+-- (below) keeps them on as early-warning radars whatever other radars the network has.
 MEDUSA_CONFIG = {
-	-- Extra name tokens; obs/observer and esm/elint always work.
-	Roles = { OBSERVER = "lookout", ESM = "df" },
+	-- Extra name tokens; obs/observer always work.
+	Roles = { OBSERVER = "lookout" },
 	Networks = {
 		{
 			name = "NORTH",
@@ -42,18 +38,9 @@ MEDUSA_CONFIG = {
 				-- An ambush site: short-range SAMs stay dark whatever the crews report, and a local radar whose role
 				-- is set to MINIMIZE (AAA for a Dog Ear with guns) makes no periodic sweeps.
 				EMCON = { SR_SAM = "MINIMIZE", AAA = "MINIMIZE" },
-				-- Listening stations with taller masts, listening every 15 s.
-				PassiveDetection = true,
-				ESM = {
-					MastHeightM = 20,
-					MaxRangeKm = 250,
-					SidelobeRangeKm = 40,
-					AewMaxRangeKm = 400,
-					BearingSigmaDeg = 2,
-					LookIntervalSec = 15,
-				},
-				-- Units with no skill in the mission file (spawned, Random, Player) report as Good crews.
-				CrewSuppression = { DefaultCrewSkill = "GOOD" },
+				-- Units with no skill in the mission file (spawned, Random, Player) report as Good crews; their
+				-- suppression resistance stays at CrewSuppression.DefaultCrewSkill (Average).
+				CrewFactorsDefaultSkill = "GOOD",
 			},
 		},
 	},

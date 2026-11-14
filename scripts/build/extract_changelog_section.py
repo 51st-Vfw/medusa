@@ -26,7 +26,9 @@ def main() -> None:
     out = Path(sys.argv[3])
     body = extract_section(tag, changelog)
     if not body:
-        body = f"Release notes for {tag} not found in CHANGELOG.md."
+        # [BKE] A release without notes stops here, before the workflow creates it.
+        print(f"error: CHANGELOG.md has no release notes for {tag}", file=sys.stderr)
+        sys.exit(1)
     out.write_text(body + "\n", encoding="utf-8")
 
 

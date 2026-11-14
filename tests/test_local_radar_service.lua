@@ -639,3 +639,77 @@ function TestLocalRadarService:test_training_mode_sweeps_on_a_fixed_per_radar_ph
 	-- then every mid-window period after the sweep
 	lu.assertEquals(w.state.byGroup["dogear"].NextSweepAt, first + 15 + 240)
 end
+
+-- SAMAsEWR = "WHEN_NO_EWR": the long- and medium-range SAMs act as early-warning radars only while the network has
+-- no early-warning radar. A local cueing radar is dark until needed, so it is no early-warning radar.
+
+local function longRangeSam(w)
+	local b = Medusa.Entities.Battery.new({
+		BatteryId = "sam",
+		NetworkId = "net",
+		GroupId = 99,
+		GroupName = "grp-sam",
+		Role = C.BatteryRole.LR_SAM,
+		Position = { x = 30000, y = 0, z = 0 },
+		ActivationState = AS.STATE_COLD,
+		OperationalStatus = C.BatteryOperationalStatus.ACTIVE,
+	})
+	b.Units = { unit("sam1", { BUR.SEARCH_RADAR }), unit("sam2", { BUR.LAUNCHER }) }
+	w.batteries:add(b)
+	return b
+end
+
+local function samsActAsEwr(w, doctrine, now)
+	local sam = w.batteries:get("sam")
+	Medusa.Services.EmconService.applyPolicy({
+		batteryStore = w.batteries,
+		sensorStore = w.sensors,
+		doctrine = doctrine,
+		now = now or 0,
+	}, nil)
+	return sam.IsActingAsEWR
+end
+
+function TestLocalRadarService:test_sams_act_as_early_warning_radars_when_the_only_radar_is_a_lone_dog_ear()
+	local w = world()
+	longRangeSam(w)
+	w.sensors:add(sensor("dogear", DOG_EAR_RANGE))
+	local doctrine = { LocalCueingRadars = true, SAMAsEWR = "WHEN_NO_EWR", EMCON = {} }
+	-- until its reach is probed the Dog Ear is a plain sensor group and counts as the network's radar
+	lu.assertFalse(samsActAsEwr(w, doctrine, 0))
+	LRS.classify(ctx(w, 0, doctrine))
+	lu.assertTrue(samsActAsEwr(w, doctrine, 1))
+	-- it stays so while the Dog Ear is up, so the SAMs do not switch roles each time it comes up
+	addTrack(w, track("t1", { x = 20000, y = 2000, z = 0 }))
+	LRS.update(ctx(w, 10, doctrine))
+	lu.assertTrue(lit(w, "dogear"))
+	lu.assertTrue(samsActAsEwr(w, doctrine, 11))
+end
+
+function TestLocalRadarService:test_a_dog_ear_named_ewr_is_an_early_warning_radar_and_the_sams_stay_sams()
+	local w = world()
+	longRangeSam(w)
+	w.sensors:add(sensor("north.ewr.dogear", DOG_EAR_RANGE, { NamedRole = true }))
+	local doctrine = { LocalCueingRadars = true, SAMAsEWR = "WHEN_NO_EWR", EMCON = {} }
+	LRS.classify(ctx(w, 0, doctrine))
+	lu.assertFalse(samsActAsEwr(w, doctrine, 1))
+end
+
+function TestLocalRadarService:test_a_dog_ear_beside_an_early_warning_radar_leaves_the_sams_sams()
+	local w = world()
+	longRangeSam(w)
+	w.sensors:add(sensor("dogear", DOG_EAR_RANGE))
+	w.sensors:add(sensor("ewr", EWR_RANGE, { Position = { x = 150000, y = 0, z = 0 } }))
+	local doctrine = { LocalCueingRadars = true, SAMAsEWR = "WHEN_NO_EWR", EMCON = {} }
+	LRS.classify(ctx(w, 0, doctrine))
+	lu.assertFalse(samsActAsEwr(w, doctrine, 1))
+end
+
+function TestLocalRadarService:test_with_local_cueing_radars_off_a_lone_dog_ear_is_the_networks_ewr_as_in_stock()
+	local w = world()
+	longRangeSam(w)
+	w.sensors:add(sensor("dogear", DOG_EAR_RANGE))
+	local doctrine = { LocalCueingRadars = false, SAMAsEWR = "WHEN_NO_EWR", EMCON = {} }
+	LRS.classify(ctx(w, 0, doctrine))
+	lu.assertFalse(samsActAsEwr(w, doctrine, 1))
+end

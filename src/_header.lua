@@ -118,14 +118,31 @@ Medusa.baseVersion = "{{MEDUSA_BASE}}"
 Medusa.displayName =
 	string.format("Medusa IADS - %s v%s (based on Medusa v%s)", Medusa.edition, "{{VERSION}}", Medusa.baseVersion)
 
--- High-precision timer: os.clock() if available (microsecond CPU time), else GetTime() (1ms mission time)
+-- High-precision timer: os.clock() if available (microsecond CPU time), else GetTime() (mission model time).
+-- DCS sanitizes `os` for mission scripts, so inside a mission the timer is normally model time, which does not
+-- advance within a frame: every measured duration reads 0. hpTimerIsWallClock says whether durations mean anything;
+-- when it is false they are not recorded in metrics.
 -- selene: allow(undefined_variable)
 if os and os.clock then
 	Medusa.hpTimer = os.clock
 	Medusa.hpTimerSource = "os.clock"
+	Medusa.hpTimerIsWallClock = true
 else
 	Medusa.hpTimer = GetTime or function()
 		return 0
 	end
 	Medusa.hpTimerSource = "GetTime"
+	Medusa.hpTimerIsWallClock = false
+end
+
+--- One line naming the timer, for the start-up log.
+---@return string
+function Medusa.timerNote()
+	if Medusa.hpTimerIsWallClock then
+		return string.format("timer: %s (duration metrics are measured)", Medusa.hpTimerSource)
+	end
+	return string.format(
+		"timer: mission model time (%s); os is not available to mission scripts, so duration metrics are not recorded",
+		Medusa.hpTimerSource
+	)
 end

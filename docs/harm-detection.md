@@ -1,10 +1,11 @@
 # [BKE] HARM detection and contact evidence
 
-Medusa recognises anti-radiation missiles (ARMs, "HARMs") from how they fly, not from what DCS says they are, and lets
+Medusa recognizes anti-radiation missiles (ARMs, "HARMs") from how they fly, not from what DCS says they are, and lets
 threatened batteries shut down or defend themselves. The official
 [HARM Detection and Defense](https://medusa.airdefense.systems/guides/harm-detection-and-defense/) guide explains the
-method and the defence strategies (`HARMResponse` and the other fields in [Doctrine fields](doctrine-fields.md#harm-defence)).
-BKE keeps the method and the defences, and changes how fast and on what evidence a contact is called an ARM.
+method and the defense strategies (`HARMResponse` and the other fields in [Doctrine
+fields](doctrine-fields.md#harm-defense)). BKE keeps the method and the defenses, and changes how fast and on what
+evidence a contact is called an ARM.
 
 Everything on this page is always on, except the per-radar refresh rates, which doctrine `ScanUpdateRateSec` sets.
 
@@ -19,7 +20,7 @@ Everything on this page is always on, except the per-radar refresh rates, which 
 | Track refresh | ~~5 s for every radar~~ | 10 s early-warning, 5 s SAM search, 2 s HOT engagement radar |
 | Score per look / in total | ~~at most 5~~ / ~~unbounded~~ | at most 4 / within ±20 |
 | Return size, launch cues, crew sightings | not used | used as evidence |
-| A confirmed ARM that slows down | can be relabelled an aircraft | stays an ARM while it attacks a site |
+| A confirmed ARM that slows down | can be relabeled an aircraft | stays an ARM while it attacks a site |
 | Finding the aircraft that fired it | needs a track point within ~~3 s~~ | within 12 s, dead-reckoned |
 | A bomb dropped near a radar | can be confirmed as an ARM | held back ([Released stores](released-stores.md)) |
 
@@ -31,7 +32,7 @@ the confirm threshold makes it a confirmed ARM; the network then shuts down or d
 
 Medusa 1.6.0 needed 25 looks and a track at least 10 s old before it would decide. At 5 s looks that is about two
 minutes, which is longer than most HARM flights: many were called after impact. BKE needs 5 looks and no age, so the
-HARM response and point defence act while the missile is still in the air. A new or re-acquired track also keeps its
+HARM response and point defense act while the missile is still in the air. A new or re-acquired track also keeps its
 first sighting in its history, so its evaluation starts one look sooner.
 
 The score is bounded: one look counts at most 4 (stock 5) and the total stays within ±20. A jet tracked for many
@@ -54,7 +55,7 @@ early-warning radar is coarse, as it should be.
 
 ```lua
 doctrine = {
-	-- Stock Medusa 1.6.0 behaviour: one rate for every radar
+	-- Stock Medusa 1.6.0 behavior: one rate for every radar
 	ScanUpdateRateSec = { EWR = 5, SAM_SEARCH = 5, SAM_TRACK = 5 },
 }
 ```
@@ -81,7 +82,7 @@ only when it is confident.
   becomes an ARM on size alone.
 - A contact the radars confidently see as aircraft-sized is never confirmed as an ARM, however it dives at a radar (at
   most a probable one). In test scenarios (simulated runs of 10 looks) an ARM seen only beam-on is called
-  aircraft-sized in about 0.2-0.3% of runs.
+  aircraft-sized in about 0.2-0.3% of runs. These figures come from simulated runs, not DCS flights.
 
 **Stealth is meant to be hard.** A low-observable aircraft returns less than an ARM. Size alone never turns it into a
 missile or confirms one; it has to fly like an ARM too. When stealth aircraft arrive in DCS they will be harder to
@@ -89,10 +90,11 @@ classify, as they should be.
 
 ### Launch cues
 
-A new contact that appears within 6 km of a track at least 10 s old and pulls away from it at more than 120 m/s is
-what an operator sees when a missile leaves an aircraft. The new track is marked as launched from the older one.
-Every ARM in DCS that was tested shows this (AGM-88, AGM-45, AGM-122, ALARM, Kh-25MP, Kh-31P, Kh-58); gliding and
-jet-powered weapons (TALD, JSOW, SLAM-ER, cruise missiles) do not, and are left to the other evidence.
+A new contact that appears within 6 km of a track at least 10 s old (and not a confirmed ARM silent for two of its looks) and pulls
+away from it at more than 120 m/s is what an operator sees when a missile leaves an aircraft. The new track is marked as
+launched from the older one. Every ARM in DCS that was tested shows this (AGM-88, AGM-45, AGM-122, ALARM, Kh-25MP,
+Kh-31P, Kh-58); gliding and jet-powered weapons (TALD, JSOW, SLAM-ER, cruise missiles) do not, and are left to the other
+evidence.
 
 ### Crews name what they see close up
 
@@ -104,7 +106,7 @@ used.
 ## An ARM stays an ARM
 
 In Medusa 1.6.0 a confirmed ARM could lose its label as it slowed in its terminal dive; a Kh-58 or ALARM could be
-relabelled an aircraft seconds before it hit. In BKE a confirmed ARM keeps its label until its flight shows it is not
+relabeled an aircraft seconds before it hit. In BKE a confirmed ARM keeps its label until its flight shows it is not
 attacking a SAM site:
 
 - it is "attacking" while, over the ground, it closes on some battery (emitting or shut down) faster than 20 m/s, will
@@ -127,7 +129,8 @@ velocity.
 - [Alert zones](alert-zones.md) with `MedusaThreats = "arms"` count confirmed ARMs; `munitions` also counts contacts
   with a clearly small return that the HARM check judges a possible ARM.
 - The [debrief log](debrief-log.md) has an `ARM_CONFIRMED` line for each confirmed ARM, and an `ARM_BLOCKED` line when
-  an ARM-like contact was held back (by its aircraft-sized return, or because it is a released store).
+  an ARM-like contact was held back (by its aircraft-sized return, because it is a released store, or because it falls
+  like a bomb that lands away from every battery).
 - HARM checks scan one list of emitting batteries per phase instead of a grid search per track, about five times
   faster with 300 tracks.
 

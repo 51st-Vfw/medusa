@@ -25,6 +25,7 @@ Medusa.Logger:initialize(Medusa.Config)
 local _entryLog = Medusa.Logger:ns("Entrypoint")
 -- [BKE] The banner names the edition and the Medusa release it is based on.
 _entryLog:info(Medusa.displayName)
+_entryLog:info(Medusa.timerNote())
 _entryLog:info(string.format("Medusa by %s; %s by the 667th Black Knights / 51st VFW", Medusa.Author, Medusa.edition))
 if #Medusa.Contributors > 0 then
 	_entryLog:info("Contributors: " .. table.concat(Medusa.Contributors, ", "))

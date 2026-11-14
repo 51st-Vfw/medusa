@@ -7,9 +7,9 @@
 
 Integrated Air Defense System for DCS World.
 
-**[BKE]** **Medusa IADS - Black Knight Edition (BKE) v0.0.1**, based on Medusa v1.6.0.
+**[BKE]** **Medusa IADS - Black Knight Edition (BKE) v0.1.0**, based on Medusa v1.6.0.
 
-Black Knight Edition is a customised version of Medusa, made to meet the particular preferences and needs of the 667th
+Black Knight Edition is a customized version of Medusa, made to meet the particular preferences and needs of the 667th
 Black Knights and the 51st VFW. Medusa is the work of Zach Shepard, and we thank him for it: BKE exists because
 Medusa is so good to build on. His Medusa, at [github.com/medusa-iads/medusa](https://github.com/medusa-iads/medusa)
 and [medusa.airdefense.systems](https://medusa.airdefense.systems), is the official version. He, and anyone else, is
@@ -24,32 +24,32 @@ stock files is kept in ~~strikeout~~.
 Medusa's idea is an IADS that only knows what its sensors could know, and acts on it the way real crews would. BKE
 pushes further in that direction: the network decides *what* a contact is from evidence it could plausibly have (how
 it flies, how big its return is, what a crew saw), never from what DCS knows the object to be. The decoy,
-re-acquisition, ground-sensor and crew behaviours each have a doctrine switch; the HARM corrections, contact evidence
+re-acquisition, ground-sensor and crew behaviors each have a doctrine switch; the HARM corrections, contact evidence
 and fixes are always on. Every switch is on by default except training mode. The full list is in
 [Differences from Medusa 1.6.0](docs/differences-from-medusa-1.6.0.md).
 
 **Existing missions:** an unnamed Dog Ear in a group without missile launchers is no longer an always-on
 early-warning radar (see Local cueing radars below). Name it with the `ewr` token, or set doctrine
-`LocalCueingRadars = false`, to keep it always on. A dark Dog Ear still counts as the network's radar, so stock
-Medusa's fallback of using SAM radars as early-warning radars when none is left (`SAMAsEWR = "WHEN_NO_EWR"`) does not
-start for a network whose only radar is a lone Dog Ear.
+`LocalCueingRadars = false`, to keep it always on. A cueing Dog Ear is not an early-warning radar, so stock
+Medusa's fallback of using SAM radars as early-warning radars when none is left (`SAMAsEWR = "WHEN_NO_EWR"`) starts
+for a network whose only radar is a lone, unnamed Dog Ear.
 
 ### Faster, fairer HARM defense
 
-- **HARMs are recognised in time to matter.** Stock 1.6.0 needed 25 radar looks and a 10 s wait before it would call
+- **HARMs are recognized in time to matter.** Stock 1.6.0 needed 25 radar looks and a 10 s wait before it would call
   a contact an ARM, about two minutes, often after impact. BKE needs 5 looks: a HARM on a HOT S-300 or Tor is called
   in about 10 s, one seen only by early-warning radars in about 50 s. Shutdowns and point defense now happen while
   the missile is still in the air. ([medusa#41](https://github.com/medusa-iads/medusa/issues/41))
 - **Radars refresh at their own pace.** Early-warning radars update their tracks every 10 s, SAM search radars every
   5 s, a HOT engagement radar every 2 s. A track held by a fire-control radar is sharper than one held by a long-range
   search set, as it should be. Tunable per kind with doctrine `ScanUpdateRateSec`.
-- **An ARM stays an ARM.** A confirmed Kh-58 or ALARM slowing in its terminal dive is no longer relabelled an aircraft
+- **An ARM stays an ARM.** A confirmed Kh-58 or ALARM slowing in its terminal dive is no longer relabeled an aircraft
   a few seconds before it kills the radar. The label clears only when the flight stops looking like an attack on a
   SAM site.
 - **The shooter gets found.** The aircraft that fired a confirmed HARM is identified from its track history whatever
   the radar refresh rate (stock missed about half the launchers seen only by early-warning radars).
 - **No banked "it's a jet" evidence.** An aircraft tracked for minutes can no longer build up so much aircraft
-  evidence that a real ARM-like run is never recognised.
+  evidence that a real ARM-like run is never recognized.
 - **A bomb is not a missile.** A contact first seen just below an aircraft, where a store dropped in the last few
   seconds would be, that never speeds up on its own has no motor, so it is not confirmed as an ARM, however it dives
   at a radar (alert zones still see it, and point defense still engages it if it is falling on the site it protects).
@@ -58,7 +58,8 @@ start for a network whose only radar is a lone Dog Ear.
   network to know the aircraft is one (an aircraft-sized return or a crew sighting) and to see the store within about
   10 s of its release. In test scenarios (replays of recorded DCS runs) at 2, 5 and 10 s looks it stopped all but 12,
   2 and 2 of the 136, 86 and 22 false ARM calls on FAB-250s and GBU-31s (those left were first seen 13-40 s after
-  release), and no ARM was missed or called later. The debrief log says when this held a call back.
+  release), and no ARM was missed or called later. These figures come from replays of recorded DCS test flights. The
+  debrief log says when this held a call back.
 
 ### Seeing what's out there: contact evidence
 
@@ -83,7 +84,7 @@ the network a way to see through them over time, using only what a radar operato
   descending, becomes a suspected decoy after 60 s and a probable decoy after about 90 s. Long- and medium-range SAMs
   stop engaging and waking for probable decoys; point defense still kills one whose glide is predicted to end at the
   site it protects. Climbing, accelerating, turning hard or simply outliving the glide clears the label for good, so a
-  jet can't fake it. In test scenarios (replays of recorded DCS flights), 85% of TALDs were recognised and no jet,
+  jet can't fake it. In test scenarios (replays of recorded DCS flights), 85% of TALDs were recognized and no jet,
   JSOW, SLAM-ER or ARM was.
 - **Engage-air-weapons.** While a HOT battery sees only probable decoys and known aircraft, its crew is told not to
   fire at "weapons" on its own; the option goes back on as soon as anything else shows up. Its own missile in flight
@@ -109,33 +110,22 @@ the network a way to see through them over time, using only what a radar operato
 - **Re-acquisition from evidence.** When a lost track reappears where it should be by now, flying as it should, the
   network picks it back up with its old id and what it already knew about it (identification, decoy label), whatever
   DCS object it is. A contact that shows up somewhere else is a new track; a missile coming off a jet never inherits
-  the jet's track. A confirmed ARM's label carries over only across gaps of 20 s or less, and a track counts as lost
-  only after `TrackMemorySec` (30 s by default), so with the default a re-acquired ARM is judged afresh. Doctrine
-  `EvidenceReacquisition`.
+  the jet's track. A confirmed ARM that misses two of its radar looks in a row can be continued by a new contact, and
+  its label carries over across gaps of 20 s or less (so not for an ARM held only by 10 s early-warning
+  radars). Doctrine `EvidenceReacquisition`.
 
 ### Eyes and ears on the ground
 
 - **Local cueing radars.** A short-range search radar in a group without missiles (a Dog Ear) is now a cueing radar
   instead of an always-on early-warning radar: dark until something comes near, then up long enough to cue its guns
   and MANPADs onto the nearest aircraft. The Shilka in a Dog Ear + Shilka group and the Iglas in a Dog Ear + Igla
-  group are now actually directed by their radar. Name a Dog Ear with `ewr` to keep the old behaviour. Doctrine
+  group are now actually directed by their radar. Name a Dog Ear with `ewr` to keep the old behavior. Doctrine
   `LocalCueingRadars`, `LocalRadarSweeps`.
 - **Observer posts and crew reports.** Ground crews and observer posts (groups named with `obs` or `observer`) watch
   and listen for aircraft, limited by daylight, weather, terrain and distance, and radio in coarse, delayed, sometimes
   lost reports: "two fast movers, low, heading north". Reports wake MANPADs, cue guns, bring up cueing radars, and can
   wake a nearby short- or medium-range SAM to WARM. They never create a track or a firing solution. Doctrine
   `ObserverReports`, `LocalInitiative`.
-- **Listening stations.** A ground group named with `esm` or `elint` is a radio direction-finding station: it hears
-  the radar of a hostile aircraft and takes a bearing on it, as a real station could: only while the radar transmits,
-  above the station's radio horizon and in line of sight, in the radar's main beam out to about 250 km or its weak
-  sidelobes close in. A bearing is a direction only, with a coarse class (early-warning, fire-control or other
-  airborne radar) and no identity. The network gets a position only by crossing bearings from different stations,
-  and has to work out which bearing goes with which from the bearings alone; when several jets of one kind make
-  crossings where no aircraft is, it knows something is out there but not where, until a third station settles it. A
-  fix is treated like a hostile observer report, never as a track or a firing solution; fire-control radars heard
-  put a surprised network on alert (an AWACS alone does not). **A jet with its radar off is invisible to them: EMCON
-  discipline pays.** Jammers cannot be heard (DCS does not tell a script that an aircraft is jamming), and whether DCS
-  reports a player aircraft's radar is not yet confirmed. Doctrine `PassiveDetection`, numbers in `ESM`.
 - **Mission EMCON wins.** A mission that sets an EMCON policy for a role keeps that role's SAM batteries dark whatever
   the crews report, so ambush sites stay ambushes (cueing radars still come up for their guns; `MINIMIZE` stops their
   sweeps).
@@ -148,8 +138,8 @@ learns, on top of (not instead of) what DCS's own unit skill does to how they sh
 - **Set your crews' skill.** Whether a crew gets a usable report out at all, how fast and how accurate depends on its
   skill in the mission: an Average crew (the Mission Editor's default for ground units) manages a report about one
   time in four and takes minutes, an Excellent crew almost always and in about half a minute. Units spawned during a
-  mission, and units set to Random or Player skill, count as Average (the doctrine's
-  `CrewSuppression.DefaultCrewSkill`). Give your observer posts and key crews Good skill or better.
+  mission, and units set to Random or Player skill, count as Average (the doctrine's `CrewFactorsDefaultSkill`, which
+  follows `CrewSuppression.DefaultCrewSkill` unless set). Give your observer posts and key crews Good skill or better.
 - **Trained observers.** Observer posts (`obs` / `observer`) count one skill level higher, keep watching even when
   the network is surprised, and know whom to call.
 - **Readiness.** Doctrine `Readiness` sets how ready the crews are at mission start: `SURPRISED` (peacetime routine,
@@ -169,7 +159,7 @@ learns, on top of (not instead of) what DCS's own unit skill does to how they sh
 - **Debrief log.** In the normal (INFO) log, one-line `DEBRIEF|t=...|clock=HH:MM:SS|...` entries record what the
   network knew and when: first detection of each contact and by which sensor, identification, every radio report (not
   made, lost, or delivered and what it set off), readiness changes, batteries waking and why, ARMs confirmed or held
-  back, decoys recognised, fire holds, listening-station bearings and fixes, and sites lost. `t` is seconds since
+  back, decoys recognized, fire holds, and sites lost. `t` is seconds since
   mission start and `clock` the mission time of day, so the log lines up with Tacview.
 - Doctrine switch: `CrewFactors` (skill, readiness and stress; default on).
 
@@ -202,9 +192,8 @@ Example configurations are in [examples](examples/).
 
 To change your prefix or customize the IADS behavior, keep reading on!
 
-**[BKE]** Optional extras: name a lookout group `iads.<area>.obs.<label>` for an observer post, or
-`iads.<area>.esm.<label>` for a listening station, and set the skill of your ground crews and observer posts above
-Average. See [Quick start](docs/quick-start.md).
+**[BKE]** Optional extras: name a lookout group `iads.<area>.obs.<label>` for an observer post, and set the skill of
+your ground crews and observer posts above Average. See [Quick start](docs/quick-start.md).
 
 ## Documentation
 
@@ -229,15 +218,15 @@ same sections: [Installation](docs/installation.md), [Quick start](docs/quick-st
 
 ## Contributing
 
-**[BKE]** Please contribute to official Medusa, at [github.com/medusa-iads/medusa](https://github.com/medusa-iads/medusa),
-rather than to this edition. Members of the 51st VFW and the 667th with BKE requests or contributions: contact
-Blackdog of the 667th.
+**[BKE]** Please contribute to official Medusa, at
+[github.com/medusa-iads/medusa](https://github.com/medusa-iads/medusa), rather than to this edition. Members of the 51st
+VFW and the 667th with BKE requests or contributions: contact Blackdog of the 667th.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ## License
 
-[GPL-3.0](LICENSE), the licence Medusa ships in its LICENSE file.
+[GPL-3.0](LICENSE), the license Medusa ships in its LICENSE file.
 
 **[BKE]** Medusa IADS is the work of Zach Shepard (YoloWingPixie). Black Knight Edition is distributed under the same
 license.

@@ -165,6 +165,57 @@ function TestIgnoreStrategy:test_activeDefensePriorityWithPDSkipsShutdown()
 	lu.assertNil(hvaBattery.HarmShutdownUntil)
 end
 
+function TestIgnoreStrategy:test_secondPdProviderStillProtectsWhenFirstIsDestroyed()
+	local deadPd = makeBattery({
+		GroupId = 200,
+		GroupName = "PD-1",
+		OperationalStatus = BOS.DESTROYED,
+		Position = { x = 100, y = 0, z = 0 },
+	})
+	local livePd = makeBattery({
+		GroupId = 201,
+		GroupName = "PD-2",
+		IsPointDefense = true,
+		HarmCapableUnitCount = 4,
+		TotalAmmoStatus = 8,
+		Position = { x = -100, y = 0, z = 0 },
+	})
+	local hvaBattery = makeBattery({
+		PointDefenseProviderId = deadPd.BatteryId,
+		PointDefenseProviderIds = { deadPd.BatteryId, livePd.BatteryId },
+	})
+	local t = makeTrack()
+	local batteryStore, trackStore, geoGrid = makeStores({ hvaBattery, deadPd, livePd }, { t })
+	local doctrine = { HARMResponse = "SHUTDOWN_UNLESS_PD" }
+	local shutdowns = HRS.executeResponse(
+		makeCtx({ trackStore = trackStore, batteryStore = batteryStore, doctrine = doctrine, geoGrid = geoGrid })
+	)
+	lu.assertEquals(shutdowns, 0)
+	lu.assertNil(hvaBattery.HarmShutdownUntil)
+end
+
+function TestIgnoreStrategy:test_vlrSamWithAutoAssignedPdIsProtectedNotShutDown()
+	local pdBattery = makeBattery({
+		GroupId = 200,
+		GroupName = "PD-1",
+		Role = C.BatteryRole.SR_SAM,
+		HarmCapableUnitCount = 4,
+		TotalAmmoStatus = 8,
+		Position = { x = 100, y = 0, z = 0 },
+	})
+	local vlrBattery = makeBattery({ Role = C.BatteryRole.VLR_SAM })
+	local t = makeTrack()
+	local batteryStore, trackStore, geoGrid = makeStores({ vlrBattery, pdBattery }, { t })
+	Medusa.Services.PointDefenseService.autoAssignShorad({ batteryStore = batteryStore, geoGrid = geoGrid })
+	local doctrine = { HARMResponse = "SHUTDOWN_UNLESS_PD" }
+	local shutdowns = HRS.executeResponse(
+		makeCtx({ trackStore = trackStore, batteryStore = batteryStore, doctrine = doctrine, geoGrid = geoGrid })
+	)
+	lu.assertEquals(shutdowns, 0)
+	lu.assertNil(vlrBattery.HarmShutdownUntil)
+	lu.assertEquals(vlrBattery.HarmDefenseState, C.HarmDefenseState.PD_PROTECTED)
+end
+
 function TestIgnoreStrategy:test_pdProviderDestroyedFallsBackToShutdown()
 	local pdBattery = makeBattery({
 		GroupId = 200,
@@ -571,4 +622,95 @@ function TestEmptyInputs:test_noBatteriesReturnsZero()
 		),
 		0
 	)
+end
+
+-- == TestSeveralPointDefenseProviders ==
+
+TestSeveralPointDefenseProviders = {}
+
+function TestSeveralPointDefenseProviders:setUp()
+	setupMocks()
+	self.ulidCounter = 0
+	NewULID = function()
+		self.ulidCounter = self.ulidCounter + 1
+		return string.format("ULID-%d", self.ulidCounter)
+	end
+end
+
+local function gunAndTorProviders(gunAmmo, torAmmo)
+	local guns = makeBattery({
+		GroupId = 200,
+		GroupName = "PD-GUNS",
+		IsPointDefense = true,
+		HarmCapableUnitCount = 0,
+		TotalAmmoStatus = gunAmmo,
+		Position = { x = 100, y = 0, z = 0 },
+	})
+	local tor = makeBattery({
+		GroupId = 201,
+		GroupName = "PD-TOR",
+		IsPointDefense = true,
+		HarmCapableUnitCount = 4,
+		TotalAmmoStatus = torAmmo,
+		Position = { x = -100, y = 0, z = 0 },
+	})
+	return guns, tor
+end
+
+--- A SAM protected by `ids` in assignment order, as setAssignment leaves it.
+local function protectedBy(ids, data)
+	data = data or {}
+	data.PointDefenseProviderIds = ids
+	data.PointDefenseProviderId = ids[1]
+	return makeBattery(data)
+end
+
+local function runShutdownUnlessPd(hva, guns, tor)
+	local batteryStore, trackStore, geoGrid = makeStores({ hva, guns, tor }, { makeTrack() })
+	return HRS.executeResponse(makeCtx({
+		trackStore = trackStore,
+		batteryStore = batteryStore,
+		doctrine = { HARMResponse = "SHUTDOWN_UNLESS_PD" },
+		geoGrid = geoGrid,
+	}))
+end
+
+function TestSeveralPointDefenseProviders:test_harm_capable_provider_listed_second_still_protects()
+	local guns, tor = gunAndTorProviders(500, 8)
+	local hva = protectedBy({ guns.BatteryId, tor.BatteryId })
+	lu.assertEquals(runShutdownUnlessPd(hva, guns, tor), 0)
+	lu.assertEquals(hva.HarmDefenseState, C.HarmDefenseState.PD_PROTECTED)
+end
+
+function TestSeveralPointDefenseProviders:test_spent_harm_capable_provider_first_does_not_protect()
+	local guns, tor = gunAndTorProviders(500, 0)
+	local hva = protectedBy({ tor.BatteryId, guns.BatteryId })
+	lu.assertEquals(runShutdownUnlessPd(hva, guns, tor), 1)
+	lu.assertNotNil(hva.HarmShutdownUntil)
+end
+
+function TestSeveralPointDefenseProviders:test_auto_defense_adds_the_units_of_every_provider()
+	-- Both Tors are out of missiles, so neither makes the SAM PD_PROTECTED; AUTO_DEFENSE then weighs its own units
+	-- plus each provider's HARM-capable units against the HARMs, as it does for a single provider.
+	local guns, tor = gunAndTorProviders(500, 0)
+	local tor2 = makeBattery({
+		GroupId = 202,
+		GroupName = "PD-TOR-2",
+		IsPointDefense = true,
+		HarmCapableUnitCount = 4,
+		TotalAmmoStatus = 0,
+		Position = { x = 0, y = 0, z = 100 },
+	})
+	local hva = protectedBy(
+		{ tor.BatteryId, guns.BatteryId, tor2.BatteryId },
+		{ HarmCapableUnitCount = 1, TotalAmmoStatus = 4 }
+	)
+	local batteryStore, trackStore, geoGrid = makeStores({ hva, guns, tor, tor2 }, { makeTrack() })
+	HRS.executeResponse(makeCtx({
+		trackStore = trackStore,
+		batteryStore = batteryStore,
+		doctrine = { HARMResponse = "AUTO_DEFENSE" },
+		geoGrid = geoGrid,
+	}))
+	lu.assertEquals(hva.HarmDefenseDefenders, 9)
 end

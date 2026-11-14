@@ -121,6 +121,44 @@ do
 		}
 	end
 
+	--- May a new contact continue this track while it is still held? Only a confirmed ARM with no aircraft evidence:
+	--- what a new contact takes is its label. An aircraft keeps its DCS object and resumes its own track; a store it
+	--- releases while it is unseen must find it a carrier and a launch-cue parent, not a lost track to continue. An
+	--- ARM's label is what is worth carrying over at once, and a contact that inherits it must still be fast enough to
+	--- be that ARM.
+	--- No allocation.
+	--- @param track table
+	--- @return boolean
+	function Svc.mayBeTakenWhileHeld(track)
+		local h = track.HarmAssessment
+		if not (h and h.label == HAS.CONFIRMED) then
+			return false
+		end
+		local seen = track.SeenAs
+		return seen ~= SEEN.AIRCRAFT and seen ~= SEEN.HELICOPTER and Medusa.Entities.Track.sizeClass(track) ~= "large"
+	end
+
+	--- Has a held track been silent long enough to count as lost to new contacts: SILENT_LOOKS of its own refresh
+	--- intervals (between its last two looks), and at least SILENT_MIN_SEC? A track with one look has no interval
+	--- yet and waits for the track memory. No allocation.
+	--- @param track table
+	--- @param now number
+	--- @return boolean
+	function Svc.isSilent(track, now)
+		local silence = now - track.LastDetectionTime
+		if silence <= R.SILENT_MIN_SEC then
+			return false
+		end
+		local ring = track.PositionHistory
+		if ring:size() < 2 then
+			return false
+		end
+		local items, pos = ring._items, ring._tail
+		local prevPos = pos > 1 and pos - 1 or ring._capacity
+		local interval = items[pos].timestamp - items[prevPos].timestamp
+		return silence > R.SILENT_LOOKS * interval
+	end
+
 	local function fit(px, py, pz, vx, vy, vz, p, v, r, rv)
 		local dx, dy, dz = p.x - px, (p.y - py) * R.ALT_WEIGHT, p.z - pz
 		local ex, ey, ez = v.x - vx, v.y - vy, v.z - vz
@@ -190,12 +228,17 @@ do
 	--- May a new contact (velocity v, launch cue `cue`) continue lost track e now? A weapon just seen leaving an
 	--- aircraft never continues an aircraft's track, nor does a contact much faster than a lost aircraft on a
 	--- similar heading (a weapon leaving it while both were unseen). A contact that would inherit an ARM label must
-	--- be fast enough to be that ARM after the gap (a jet turning away from its own lost ARM is not).
+	--- be fast enough to be that ARM after the gap (a jet turning away from its own lost ARM is not). A track still
+	--- held is offered only for its ARM label: past the longest gap the label crosses, a contact continuing it would
+	--- take the track without the label and leave the ARM's own object to come back as a new, unlabeled track.
 	function Svc.mayInherit(e, v, cue, now)
 		local speed = sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
 		if carriesArmLabel(e, now) then
 			local keep = 1 - R.ARM_MAX_SLOWDOWN_PER_SEC * (now - e.Time)
 			return speed >= e.Speed * math.max(keep, R.ARM_MIN_SPEED_KEPT)
+		end
+		if e.Held then
+			return false
 		end
 		if Svc.isWeapon(e) then
 			return true

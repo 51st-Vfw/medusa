@@ -42,6 +42,11 @@ function Medusa.Services.SensorPollingService:new(doctrine, opts)
 		_sizeDb = {}, -- truth RCS in dBsm plus the fixed shape offset, or false (no RCS)
 		_errScale = {}, -- measurement variance (dB^2) at the radar's reach; scales with (range / reach)^4
 		_class = {}, -- coarse class (Medusa.Constants.SeenAs) or false
+		-- The slowest radar still covering it (see _noteCover): its refresh interval, when it last detected the
+		-- contact, and its group.
+		_coverSec = {},
+		_coverAt = {},
+		_coverBy = {},
 		_sightSq = 0, -- squared sight recognition range, set per poll (sightRange)
 	}
 	setmetatable(o, { __index = self })
@@ -49,6 +54,7 @@ function Medusa.Services.SensorPollingService:new(doctrine, opts)
 end
 
 local CE = Medusa.Constants.ContactEvidence
+local RQ = Medusa.Constants.Reacquisition
 local SEEN = Medusa.Constants.SeenAs
 local TWO_PI = 2 * math.pi
 local LN10_DB = 10 / math.log(10)
@@ -162,7 +168,35 @@ function Medusa.Services.SensorPollingService.scanRateFor(doctrine, kind)
 	return math.max(C.SCAN_UPDATE_RATE_MIN_SEC, math.min(C.SCAN_UPDATE_RATE_MAX_SEC, value))
 end
 
-function Medusa.Services.SensorPollingService:_buildReport(entry, now, sourceType, scanRateSec, sensorCtx)
+--- Note that radar group `by`, refreshing every `rate` s, detected contact `id` now, whether or not its look is
+--- throttled (another radar looked more recently). The contact's cover is the slowest radar that has detected it
+--- within Reacquisition.COVER_FRESH_LOOKS of its own intervals: a radar that stops detecting it (shut down, out of
+--- range) stops covering it and a faster one takes over; a covering radar that speeds up (a battery engaging) covers
+--- it at its new rate. No allocation after a contact's first detection.
+function Medusa.Services.SensorPollingService:_noteCover(id, rate, now, by)
+	local sec = self._coverSec[id]
+	if not sec or rate >= sec or self._coverBy[id] == by or now - self._coverAt[id] > RQ.COVER_FRESH_LOOKS * sec then
+		self._coverSec[id] = rate
+		self._coverAt[id] = now
+		self._coverBy[id] = by
+	end
+end
+
+--- Until when the slowest radar still covering contact `id` may yet look at it: its last detection plus
+--- Reacquisition.SILENT_LOOKS of its intervals. Every look counts, throttled ones included, so this is what the network
+--- knows even when no report reached the track. nil when no radar has detected the contact (or it was forgotten).
+--- No allocation.
+--- @param id any DCS object id
+--- @return number|nil
+function Medusa.Services.SensorPollingService:coveredUntil(id)
+	local sec = self._coverSec[id]
+	if not sec then
+		return nil
+	end
+	return self._coverAt[id] + RQ.SILENT_LOOKS * sec
+end
+
+function Medusa.Services.SensorPollingService:_buildReport(entry, now, sourceType, scanRateSec, sensorCtx, groupName)
 	local obj = entry.object
 	if not obj then
 		return nil
@@ -173,10 +207,9 @@ function Medusa.Services.SensorPollingService:_buildReport(entry, now, sourceTyp
 		return nil
 	end
 
-	if
-		self._lastScanned[networkId]
-		and (now - self._lastScanned[networkId]) < (scanRateSec or self._doctrine.PerTrackScanUpdateRate)
-	then
+	local rate = scanRateSec or self._doctrine.PerTrackScanUpdateRate
+	if self._lastScanned[networkId] and (now - self._lastScanned[networkId]) < rate then
+		self:_noteCover(networkId, rate, now, groupName)
 		return nil
 	end
 
@@ -198,6 +231,7 @@ function Medusa.Services.SensorPollingService:_buildReport(entry, now, sourceTyp
 	end
 
 	self._lastScanned[networkId] = now
+	self:_noteCover(networkId, rate, now, groupName)
 	local report = {
 		NetworkId = networkId,
 		SourceType = sourceType,
@@ -236,6 +270,9 @@ function Medusa.Services.SensorPollingService:pollSensor(
 				self._sizeDb[id] = nil
 				self._errScale[id] = nil
 				self._class[id] = nil
+				self._coverSec[id] = nil
+				self._coverAt[id] = nil
+				self._coverBy[id] = nil
 			end
 		end
 		self._lastCleanup = now
@@ -256,7 +293,7 @@ function Medusa.Services.SensorPollingService:pollSensor(
 
 	local reports = {}
 	for i = 1, #detections do
-		local report = self:_buildReport(detections[i], now, sourceType, scanRateSec, sensorCtx)
+		local report = self:_buildReport(detections[i], now, sourceType, scanRateSec, sensorCtx, groupName)
 		if report then
 			reports[#reports + 1] = report
 		end
@@ -439,7 +476,7 @@ local COUNT_WORD = { "one", "two" }
 --- heard), Height ("low" | "medium" | "high"), Speed ("fast" | "slow"), Kind ("jet" |
 --- "helicopter"), Identity ("hostile" | "unidentified"), TypeName (nil unless identified and DCS flags the type
 --- known), Count ("one" | "two" | "several"), Heard (true when nothing was seen), Night. Returns false when the crew
---- saw and heard nothing it would report (own aircraft it recognised are not reported).
+--- saw and heard nothing it would report (own aircraft it recognized are not reported).
 function Medusa.Services.SensorPollingService.observeAirspace(look, out)
 	local p = look.Position
 	if not p then
@@ -475,7 +512,7 @@ function Medusa.Services.SensorPollingService.observeAirspace(look, out)
 			seen = HasLOS(obsEye, obsTarget) == true
 		end
 		local heard = dSq <= hearSq and dy <= OBS.HEARING_MAX_HEIGHT_M
-		-- An own aircraft seen close enough to recognise is not reported; anything else could be anyone's.
+		-- An own aircraft seen close enough to recognize is not reported; anything else could be anyone's.
 		if (seen or heard) and not (candOwn[i] and seen and dSq <= recognitionSq) then
 			count = count + 1
 			if not best or (seen and not bestSeen) or (seen == bestSeen and dSq < bestSq) then

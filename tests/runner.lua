@@ -51,4 +51,18 @@ for _, filepath in ipairs(list_test_files()) do
 	require(module_name)
 end
 
+-- Tests replace the global NewULID with counter mocks and not all of them restore it. Put the real one back around
+-- every test method so no mock leaks into a test that does not install its own (a leaked mock that draws random ids
+-- produces duplicate-id failures at random).
+local realNewULID = NewULID
+local execOneFunction = lu.LuaUnit.execOneFunction
+function lu.LuaUnit:execOneFunction(...)
+	NewULID = realNewULID
+	local ok, err = pcall(execOneFunction, self, ...)
+	NewULID = realNewULID
+	if not ok then
+		error(err, 0)
+	end
+end
+
 os.exit(lu.LuaUnit.run())

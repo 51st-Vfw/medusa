@@ -76,7 +76,13 @@ function TestIadsNetwork:test_doctrine_switches_evidence_reacquisition_for_its_t
 	lu.assertTrue(default._trackManager._evidenceReacquisition)
 end
 
--- A SHORAD spawned (or hit) into crew suppression is skipped by point-defence assignment; when it recovers, the links
+function TestIadsNetwork:test_tracksAskTheNetworksPollsHowLongARadarStillCoversThem()
+	local iads = makeIads()
+	iads:initialize()
+	lu.assertIs(iads._trackManager._coverSource, iads._sensorPollingService)
+end
+
+-- A SHORAD spawned (or hit) into crew suppression is skipped by point-defense assignment; when it recovers, the links
 -- must be made again.
 function TestIadsNetwork:test_crew_suppression_recovery_requests_point_defense_assignment()
 	local iads = makeIads()
@@ -88,7 +94,7 @@ function TestIadsNetwork:test_crew_suppression_recovery_requests_point_defense_a
 	lu.assertTrue(iads._pdReassignNeeded)
 end
 
--- A failure in the decoy assessment must not skip HARM response and point defence in the same phase.
+-- A failure in the decoy assessment must not skip HARM response and point defense in the same phase.
 function TestIadsNetwork:test_a_decoy_pass_failure_does_not_skip_harm_response_or_point_defence()
 	local iads = makeIads()
 	iads:initialize()
@@ -249,21 +255,19 @@ function TestIadsNetwork:test_a_decoy_launch_records_the_launchers_type()
 	local iads = makeIads()
 	iads:initialize()
 	local DRS = Medusa.Services.DecoyResponseService
-	local saved = { DRS.recordLaunch, GetWeaponDesc, GetWeaponTarget }
+	local saved = { DRS.recordLaunch, GetWeaponTarget }
 	local flight, ctxSeen
 	DRS.recordLaunch = function(ctx, _, f)
 		ctxSeen, flight = ctx, f
 	end
-	GetWeaponDesc = function()
-		return { guidance = 4 }
-	end
 	GetWeaponTarget = function()
 		return nil
 	end
-	local ok, err = pcall(iads._recordDecoyLaunch, iads, { GroupName = "sa11" }, {}, 500, {
+	local desc = { category = Weapon.Category.MISSILE, guidance = 4 }
+	local ok, err = pcall(iads._recordDecoyLaunch, iads, { GroupName = "sa11" }, {}, desc, 500, {
 		UnitTypeName = "SA-11 Buk LN 9A310M1",
 	})
-	DRS.recordLaunch, GetWeaponDesc, GetWeaponTarget = saved[1], saved[2], saved[3]
+	DRS.recordLaunch, GetWeaponTarget = saved[1], saved[2]
 	assert(ok, err)
 	lu.assertEquals(flight.LauncherType, "SA-11 Buk LN 9A310M1")
 	lu.assertEquals(flight.LaunchTime, 500)
@@ -1056,6 +1060,52 @@ function TestIadsSuppressionEvents:test_a_shot_stamps_its_batterys_launch_time_w
 	lu.assertEquals(iads._shotQueue:size(), 2)
 end
 
+function TestIadsSuppressionEvents:test_a_gun_shell_leaves_its_batterys_launch_time_alone()
+	-- A gun-missile unit's cannon burst must not hold off the decoy response's writes as a missile launch does.
+	local iads = makeIads()
+	iads:initialize()
+	local battery = {}
+	iads._assetIndex.batteryRepository = function()
+		return {
+			getByUnitId = function()
+				return battery
+			end,
+		}
+	end
+	local origGetUnitID = GetUnitID
+	GetUnitID = function(u)
+		return u.uid
+	end
+	local function shot(typeName, desc)
+		return {
+			id = world.event.S_EVENT_SHOT,
+			initiator = {
+				uid = 42,
+				getCoalition = function()
+					return COAL_RED
+				end,
+			},
+			weapon = {
+				getTypeName = function()
+					return typeName
+				end,
+				getDesc = function()
+					return desc
+				end,
+			},
+		}
+	end
+	self.now = 1000
+	HarnessWorldEventBus:publish(shot("SA9M311", { category = Weapon.Category.MISSILE }))
+	self.now = 1100
+	HarnessWorldEventBus:publish(shot("weapons.shells.2A38_30_HE"))
+	HarnessWorldEventBus:publish(shot("GSh_30", { category = Weapon.Category.SHELL }))
+	GetUnitID = origGetUnitID
+	iads._assetIndex.batteryRepository = nil
+	lu.assertEquals(battery.LastLaunchAt, 1000)
+	lu.assertEquals(iads._shotQueue:size(), 3)
+end
+
 TestIadsNetworkEventObjects = {}
 
 function TestIadsNetworkEventObjects:test_isUnitObject_readsTheObjectCategory()
@@ -1516,4 +1566,9 @@ function TestIadsNetworkDebrief:test_crew_factors_off_gives_the_observers_no_cre
 	local off = net({ CrewFactors = false })
 	lu.assertIs(Medusa.Core.IadsNetwork._localPictureCtx(on).crew, on._crew)
 	lu.assertNil(Medusa.Core.IadsNetwork._localPictureCtx(off).crew)
+end
+
+function TestIadsNetwork:test_no_listening_station_service_is_loaded()
+	lu.assertNil(Medusa.Services.EsmService)
+	lu.assertNil(Medusa.Constants.Esm)
 end

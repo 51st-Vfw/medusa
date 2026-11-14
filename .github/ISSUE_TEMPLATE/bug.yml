@@ -21,8 +21,8 @@ body:
       id: medusa-version
       attributes:
           label: Medusa BKE version
-          description: The first Medusa line in dcs.log names it, e.g. "Medusa IADS - Black Knight Edition (BKE) v0.0.1 (based on Medusa v1.6.0)".
-          placeholder: "0.0.1"
+          description: The first Medusa line in dcs.log names it, e.g. "Medusa IADS - Black Knight Edition (BKE) v0.1.0 (based on Medusa v1.6.0)".
+          placeholder: "0.1.0"
       validations:
           required: true
 

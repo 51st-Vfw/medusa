@@ -21,7 +21,7 @@ require("services.ObserverReportService")
 require("services.CrewFactorsService")
 
 -- Observer reports (HUMINT): crews look a few times a second network-wide, radio coarse reports that arrive late or
--- not at all, and a delivered report cues local defences and wakes a dark SAM to WARM, never HOT, never a track.
+-- not at all, and a delivered report cues local defenses and wakes a dark SAM to WARM, never HOT, never a track.
 
 local C = Medusa.Constants
 local OBS = C.Observer
@@ -131,12 +131,13 @@ local function addManpad(w, b)
 	return b
 end
 
-local function addPost(w, name, pos)
+local function addPost(w, name, pos, watch)
 	w.observers:add(Medusa.Entities.ObserverPost.new({
 		NetworkId = "net",
 		GroupName = name,
 		UnitNames = { name .. "-1" },
 		Position = pos,
+		Watch = watch,
 	}))
 end
 
@@ -750,6 +751,22 @@ function TestObserverReports:test_skill_of_the_group_and_its_fallback()
 	lu.assertEquals({ ORS.groupSkill(doctrine, nil, mixed, nil) }, { "AVERAGE", false })
 end
 
+function TestObserverReports:test_the_report_skill_default_is_apart_from_the_crew_suppression_one()
+	-- Suppression resistance EXCELLENT, reports AVERAGE: a crew of unknown skill reports as AVERAGE.
+	local doctrine = { CrewFactorsDefaultSkill = "AVERAGE", CrewSuppression = { DefaultCrewSkill = "EXCELLENT" } }
+	lu.assertEquals(ORS.defaultSkill(doctrine), "AVERAGE")
+	lu.assertEquals({ ORS.groupSkill(doctrine, skillIndex(nil), nil, { "spawned-1" }) }, { "AVERAGE", true })
+	-- a battery unit built with the crew-suppression default keeps it for suppression but reports at the report skill
+	local unit = { CrewSkill = "EXCELLENT", CrewSkillDefaulted = true }
+	lu.assertEquals({ ORS.groupSkill(doctrine, nil, { Units = { unit } }, nil) }, { "AVERAGE", true })
+	lu.assertEquals(unit.CrewSkill, "EXCELLENT")
+	-- a unit whose skill the mission file gives is unaffected
+	lu.assertEquals(ORS.groupSkill(doctrine, nil, { Units = { { CrewSkill = "HIGH" } } }, nil), "HIGH")
+	-- a doctrine without the field follows the crew-suppression skill
+	lu.assertEquals(ORS.defaultSkill({ CrewSuppression = { DefaultCrewSkill = "GOOD" } }), "GOOD")
+	lu.assertEquals(ORS.defaultSkill({ CrewFactorsDefaultSkill = "Random" }), "AVERAGE")
+end
+
 function TestObserverReports:test_an_average_crew_often_never_calls_it_in_and_rests_the_full_interval()
 	local w = world(function()
 		return 0.5 -- above AVERAGE 0.25: not made
@@ -1044,4 +1061,18 @@ function TestObserverReports:test_training_reports_of_a_group_take_a_new_fixed_e
 	addPost(w2, "obs-hill", { x = 0, y = 0, z = 0 })
 	second(w2, 100)
 	lu.assertNil(lookArgs[3].Seed)
+end
+
+function TestObserverReports:test_an_untrained_lookout_post_counts_as_an_other_crew_not_an_observer_post()
+	local w = world(function()
+		return 0.99
+	end)
+	w.crew = crew(R.ALERTED)
+	w.skillIndex = skillIndex("EXCELLENT")
+	addPost(w, "obs-hill", { x = 0, y = 0, z = 0 })
+	addPost(w, "esm-ridge", { x = 0, y = 0, z = 0 }, false) -- named with the old esm token
+
+	second(w, 100)
+
+	lu.assertEquals(count("crew roster of network net: 1 observer posts (EXCELLENT:1), 1 other crews (EXCELLENT:1)"), 1)
 end

@@ -212,8 +212,8 @@ tasks:
         - name: PART
           enum: [major, minor, patch]
     cmds:
+      # The script updates uv.lock itself (with the pinned uv) and writes nothing unless every step succeeds.
       - "{{.PYTHON_BIN}} {{.SCRIPT_DIR}}/build/bump_version.py {{.PART}}"
-      - task: dependencies:lock
 
   bump:major:
     desc: "Bump the major version"
@@ -341,8 +341,8 @@ tasks:
         vars:
           PART: "{{.PART}}"
       - cmd: task ci
-      - cmd: "git add -- pyproject.toml CHANGELOG.md uv.lock"
-      - cmd: 'git commit -m "Release v$({{.PYTHON_BIN}} -c "import re; from pathlib import Path; m=re.search(r''version\s*=\s*\"([\d.]+)\"'', Path(''pyproject.toml'').read_text()); print(m.group(1))")"'
+      - cmd: "git add --update"
+      - cmd: 'git commit -m "chore: release BKEv$({{.PYTHON_BIN}} -c "import re; from pathlib import Path; m=re.search(r''version\s*=\s*\"([\d.]+)\"'', Path(''pyproject.toml'').read_text()); print(m.group(1))")"'
       - task: tag
 
   release:dry-run:
@@ -358,7 +358,7 @@ tasks:
           NEXT=$({{.PYTHON_BIN}} {{.SCRIPT_DIR}}/build/bump_version.py {{.PART}} --next)
           echo "Would bump {{.PART}} to $NEXT"
           echo "Would verify the bumped source"
-          echo "Would commit: Release v$NEXT"
-          echo "Would tag: v$NEXT"
-          echo "Would atomically push {{.RELEASE_BRANCH}} and v$NEXT to origin"
+          echo "Would commit: chore: release BKEv$NEXT"
+          echo "Would tag: BKEv$NEXT"
+          echo "Would atomically push {{.RELEASE_BRANCH}} and BKEv$NEXT to origin"
         platforms: [linux, darwin]

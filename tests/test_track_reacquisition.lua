@@ -19,6 +19,8 @@ require("services.stores.BatteryStore")
 require("services.SpatialQuery")
 require("services.HarmDetectionService")
 require("services.DecoyAssessmentService")
+require("services.BlackBoxService")
+require("services.SensorPollingService")
 
 -- Evidence-based re-acquisition: a lost track is matched to a new contact by where it should be and how
 -- fast it should be going, never by DCS object id; what it carries depends on the fit, the gap and the class.
@@ -732,4 +734,519 @@ function TestTrackReacquisitionLog:test_aMixedTie_logsARefusal()
 	mockTime = mockTime + 5
 	self.mgr:processReport(report("c", after({ x = 0, y = 6000, z = 250 }, ARM_V, 5), ARM_V), mockTime)
 	lu.assertNotNil(find(self.lines, "re-acquisition refused"))
+end
+
+-- == Silent tracks still held ==
+-- With the default track memory (30 s) a confirmed ARM missing two looks in a row (its own refresh interval, from its
+-- last two looks, and two of the slowest radar's still covering it: TestTrackReacquisitionCover) can already be
+-- continued by a new contact; the DCS object it was holding resumes it as before.
+
+TestTrackReacquisitionSilent = {}
+
+function TestTrackReacquisitionSilent:setUp()
+	setupMocks()
+	self.mgr = Medusa.Services.TrackManager:new({
+		geoGrid = GeoGrid(10000, { "Battery", "Track" }),
+		displayIdAllocator = Medusa.Services.TrackDisplayIdAllocator:new(),
+		evidenceReacquisition = true,
+	})
+	self.p = { x = 0, y = 6000, z = 0 }
+end
+
+--- Fly a contact straight for `sec` seconds with looks every `step` seconds, ending at mockTime.
+function TestTrackReacquisitionSilent:fly(id, vel, sec, step)
+	local track, t0 = nil, mockTime
+	for i = sec, 0, -step do
+		mockTime = t0 - i
+		track = self.mgr:processReport(report(id, after(self.p, vel, -i), vel), mockTime)
+	end
+	return track
+end
+
+--- A confirmed ARM seen every 2 s, then silent for `gap` s (the network prunes every second meanwhile).
+function TestTrackReacquisitionSilent:silentArm(gap)
+	local arm = self:fly("arm", ARM_V, 8, 2)
+	confirmArm(arm, mockTime - 30)
+	local t0 = mockTime
+	for t = t0 + 1, t0 + gap do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	return arm, t0
+end
+
+function TestTrackReacquisitionSilent:test_aNewContactWhereASilentArmShouldBe_continuesIt_withItsLabel()
+	local arm = self:silentArm(6)
+	local again = self.mgr:processReport(report("arm#2", after(self.p, ARM_V, 6), ARM_V), mockTime)
+	lu.assertEquals(again.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNotEquals(again.TrackId, arm.TrackId)
+	lu.assertEquals(again.HarmAssessment.label, HAS.CONFIRMED)
+	lu.assertEquals(again.HarmAssessment.disproofSince, arm.HarmAssessment.disproofSince + 6)
+	lu.assertEquals(again.AssessedAircraftType, AAT.HARM)
+	-- The held track is gone: not in the store or the grid, and its DCS object no longer maps to anything.
+	lu.assertNil(self.mgr:getStore():get(arm.TrackId))
+	lu.assertNil(self.mgr:getTrackIdByNetworkId("arm"))
+	lu.assertEquals(self.mgr:getTrackIdByNetworkId("arm#2"), again.TrackId)
+	lu.assertNil(self.mgr._lost[arm.TrackId])
+end
+
+function TestTrackReacquisitionSilent:test_aTrackSilentForLessThanTwoOfItsLooks_isNoCandidate()
+	local arm = self:silentArm(3)
+	local other = self.mgr:processReport(report("arm#2", after(self.p, ARM_V, 3), ARM_V), mockTime)
+	lu.assertNotEquals(other.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(other.HarmAssessment)
+	lu.assertNotNil(self.mgr:getStore():get(arm.TrackId))
+end
+
+function TestTrackReacquisitionSilent:test_aSlowRadarsTrackWaitsForTwoOfItsLooks()
+	local arm = self:fly("arm", ARM_V, 20, 5)
+	confirmArm(arm, mockTime - 30)
+	local t0 = mockTime
+	for t = t0 + 1, t0 + 8 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	local other = self.mgr:processReport(report("x", after(self.p, ARM_V, 8), ARM_V), mockTime)
+	lu.assertNotEquals(other.DisplayTrackId, arm.DisplayTrackId)
+	for t = mockTime + 1, t0 + 11 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	local again = self.mgr:processReport(report("y", after(self.p, ARM_V, 11), ARM_V), mockTime)
+	lu.assertEquals(again.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertEquals(again.HarmAssessment.label, HAS.CONFIRMED)
+end
+
+function TestTrackReacquisitionSilent:test_theSameObjectReturning_resumesItsHeldTrack_andItIsNoLongerACandidate()
+	local arm = self:silentArm(6)
+	lu.assertNotNil(self.mgr._lost[arm.TrackId])
+	local same = self.mgr:processReport(report("arm", after(self.p, ARM_V, 6), ARM_V), mockTime)
+	lu.assertIs(same, arm)
+	lu.assertNil(self.mgr._lost[arm.TrackId])
+	mockTime = mockTime + 1
+	local other = self.mgr:processReport(report("arm#2", after(self.p, ARM_V, 7), ARM_V), mockTime)
+	lu.assertNotEquals(other.DisplayTrackId, arm.DisplayTrackId)
+end
+
+function TestTrackReacquisitionSilent:test_aSilentTrackThatExpires_isListedOnce_asLostFromItsExpiry()
+	local arm = self:silentArm(6)
+	lu.assertTrue(self.mgr._lost[arm.TrackId].Held)
+	local goneAt
+	for t = mockTime + 1, mockTime + 40 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+		if not goneAt and not self.mgr:getStore():get(arm.TrackId) then
+			goneAt = t
+		end
+	end
+	lu.assertNotNil(goneAt)
+	local n = 0
+	for _ in pairs(self.mgr._lost) do
+		n = n + 1
+	end
+	lu.assertEquals(n, 1)
+	local e = self.mgr._lost[arm.TrackId]
+	lu.assertNil(e.Held)
+	lu.assertEquals(e.expiredAt, goneAt)
+end
+
+function TestTrackReacquisitionSilent:test_aHeldTrackClearedWhileSilent_isNoLongerOffered()
+	local arm = self:silentArm(6)
+	-- Cleared while silent (by whatever the network learned meanwhile): it is no ARM now, and like any other held
+	-- track it waits for its own object. A contact where it should be is a new track with nothing ARM.
+	arm.HarmAssessment.label = HAS.CLEARED
+	arm.AssessedAircraftType = AAT.UNKNOWN
+	arm.IsSeadThreat = false
+	local again = self.mgr:processReport(report("arm#2", after(self.p, ARM_V, 6), ARM_V), mockTime)
+	lu.assertNotEquals(again.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(again.HarmAssessment)
+	lu.assertEquals(again.AssessedAircraftType, AAT.UNKNOWN)
+end
+
+function TestTrackReacquisitionSilent:test_aHeldCandidateNeverReleasesTheDisplayIdOfALiveTrack()
+	self.mgr._trackMemoryDurationSec = 600
+	local arm = self:silentArm(6)
+	for t = mockTime + 1, mockTime + Medusa.Constants.TRACK_REASSOC_TTL_SEC + 10 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	lu.assertNotNil(self.mgr:getStore():get(arm.TrackId))
+	-- Its display id is still taken: a new track gets another one.
+	local other = self.mgr:processReport(report("z", { x = 900000, y = 6000, z = 0 }, JET_V), mockTime)
+	lu.assertNotEquals(other.DisplayTrackId, arm.DisplayTrackId)
+end
+
+function TestTrackReacquisitionSilent:test_aTieOfSilentArms_retiresTheBestHeldTrack()
+	local a = self:fly("a", ARM_V, 8, 2)
+	self.p = { x = 0, y = 6000, z = 500 }
+	local b = self:fly("b", ARM_V, 8, 2)
+	confirmArm(a, mockTime - 20)
+	confirmArm(b, mockTime - 25)
+	for t = mockTime + 1, mockTime + 6 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	local c = self.mgr:processReport(report("c", after({ x = 0, y = 6000, z = 250 }, ARM_V, 6), ARM_V), mockTime)
+	lu.assertEquals(c.HarmAssessment.label, HAS.CONFIRMED)
+	local left = 0
+	for _, t in ipairs({ a, b }) do
+		if self.mgr:getStore():get(t.TrackId) then
+			left = left + 1
+			lu.assertNotNil(self.mgr._lost[t.TrackId])
+		end
+	end
+	lu.assertEquals(left, 1)
+end
+
+function TestTrackReacquisitionSilent:test_anArmSilentForTwoLooks_isNoLaunchCueParent()
+	-- Its last position is stale: a contact seen again ahead of it would seem to pull away from it.
+	local arm = self:silentArm(6)
+	lu.assertTrue(arm.HeldLost)
+	local q = after(self.p, ARM_V, 6)
+	local w = self.mgr:processReport(report("w", { x = q.x + 3000, y = q.y, z = q.z + 3000 }, ARM_V), mockTime)
+	lu.assertNil(w.LaunchCue)
+end
+
+--- A jet with aircraft evidence (a confident 5 m2 return; none when `noSize`) seen every 2 s for 40 s, `setup(jet)`
+--- applied, then silent for `gap` s while the network prunes every second.
+function TestTrackReacquisitionSilent:silentJet(gap, setup, noSize)
+	local jet, t0 = nil, mockTime
+	for i = 40, 0, -2 do
+		mockTime = t0 - i
+		local r = report("jet", after(self.p, JET_V, -i), JET_V)
+		if not noSize then
+			r.SizeDb, r.SizeVarDb = 7, 4
+		end
+		jet = self.mgr:processReport(r, mockTime)
+	end
+	if setup then
+		setup(jet)
+	end
+	for t = t0 + 1, t0 + gap do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	return jet, t0
+end
+
+function TestTrackReacquisitionSilent:test_aStoreSeenWhereASilentJetShouldBe_neverTakesItsTrack()
+	-- A jet seen every 2 s by a SAM radar that then shuts down, still covered by a 10 s early-warning radar: its next
+	-- look is not due yet. A store it releases meanwhile, seen first, is the jet's store, not the jet.
+	local cases = {
+		{ name = "plain" },
+		{ name = "no size evidence", noSize = true, noCarrier = true }, -- not known as an aircraft: no carrier either
+		{
+			name = "probable ARM-like",
+			noCarrier = true, -- an ARM-like track carries no released store (TrackManager._carrierArmLike)
+			setup = function(j)
+				j.HarmAssessment = { label = HAS.PROBABLE, llr = 5, scanCount = 12 }
+			end,
+		},
+		{
+			name = "launch-cued",
+			noCarrier = true, -- nor does one with a launch cue of its own
+			setup = function(j)
+				j.LaunchCue = { FromTrackId = "elsewhere", Time = 970 }
+			end,
+		},
+	}
+	for _, case in ipairs(cases) do
+		for _, dv in ipairs({ 0, 100, 200 }) do
+			local how = case.name .. ", +" .. dv .. " m/s"
+			self:setUp()
+			local jet = self:silentJet(6, case.setup, case.noSize)
+			lu.assertNil(jet.HeldLost, how)
+			local q = after(self.p, JET_V, 6)
+			local v = { x = JET_V.x + dv, y = 0, z = 0 }
+			local store =
+				self.mgr:processReport(report("store", { x = q.x - 300, y = q.y - 100, z = q.z }, v), mockTime)
+			lu.assertNotEquals(store.DisplayTrackId, jet.DisplayTrackId, how)
+			lu.assertIs(self.mgr:getStore():get(jet.TrackId), jet, how)
+			if case.noCarrier then
+				lu.assertNil(store.HarmAssessment, how)
+			elseif dv <= 100 then
+				-- moving with the jet: a store it released (Medusa.Constants.Release)
+				lu.assertNotNil(store.Release, how)
+				lu.assertEquals(store.Release.CarrierId, jet.TrackId, how)
+			else
+				-- pulling away from it: a launch cue from the jet
+				lu.assertNotNil(store.LaunchCue, how)
+				lu.assertEquals(store.LaunchCue.FromTrackId, jet.TrackId, how)
+			end
+			-- the jet's next look (its own DCS object) resumes its track
+			mockTime = mockTime + 4
+			local again = self.mgr:processReport(report("jet", after(self.p, JET_V, 10), JET_V), mockTime)
+			lu.assertIs(again, jet, how)
+		end
+	end
+end
+
+function TestTrackReacquisitionSilent:test_onlyAConfirmedArmWithoutAircraftEvidence_isListedWhileHeld()
+	local arm = self:silentArm(6)
+	lu.assertTrue(arm.HeldLost)
+	-- the same ARM flight with an aircraft-sized return: not listed
+	self:setUp()
+	local big = self:fly("big", ARM_V, 8, 2)
+	big.SizeDb, big.SizeWeight, big.SizeSpreadDb = 7, 4, 1.8
+	confirmArm(big, mockTime - 30)
+	for t = mockTime + 1, mockTime + 6 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	lu.assertNil(big.HeldLost)
+	-- typed HARM without a confirmed label: it has no label to hand on, and waits for its own object
+	self:setUp()
+	local typed = self:fly("typed", ARM_V, 8, 2)
+	typed.AssessedAircraftType = AAT.HARM
+	for t = mockTime + 1, mockTime + 6 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	lu.assertNil(typed.HeldLost)
+end
+
+function TestTrackReacquisitionSilent:test_aSalvoMateBesideAnArmWhoseOnlyRadarShutDown_takesItsLabel()
+	-- The only radar covering the ARM (a SAM radar looking every 2 s) shut down; a second ARM of the salvo is then
+	-- first seen beside the first (by a radar that did not cover the first). Nothing tells the two apart: the new
+	-- contact continues the silent ARM's track, confirmed, and the first ARM, seen again later, comes back as a new
+	-- track judged on its own flight. One of the two is confirmed either way, as when the second ARM is a new track.
+	local arm = self:silentArm(6)
+	local q = after(self.p, ARM_V, 6)
+	local mate = self.mgr:processReport(report("mate", { x = q.x - 400, y = q.y, z = q.z + 300 }, ARM_V), mockTime)
+	lu.assertEquals(mate.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertEquals(mate.HarmAssessment.label, HAS.CONFIRMED)
+	for t = mockTime + 1, mockTime + 4 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	local again = self.mgr:processReport(report("arm", after(self.p, ARM_V, 10), ARM_V), mockTime)
+	lu.assertNotEquals(again.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(again.HarmAssessment)
+end
+
+function TestTrackReacquisitionSilent:test_anArmStillCoveredByASlowerRadar_keepsItsTrackFromASalvoMate()
+	-- A SAM radar looked every 2 s and shut down, while a 10 s early-warning radar that last detected the ARM at t0
+	-- still covers it (the network's polls say so) until t0 + 20: the ARM is not lost before then, so a salvo mate
+	-- first seen beside it is a new track, and the ARM's own next look resumes it, confirmed.
+	local t0 = mockTime
+	self.mgr:setCoverSource({
+		coveredUntil = function(_, id)
+			return id == "arm" and t0 + 20 or nil
+		end,
+	})
+	local arm = self:silentArm(6)
+	lu.assertNil(arm.HeldLost)
+	local q = after(self.p, ARM_V, 6)
+	local mate = self.mgr:processReport(report("mate", { x = q.x - 400, y = q.y, z = q.z + 300 }, ARM_V), mockTime)
+	lu.assertNotEquals(mate.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(mate.HarmAssessment)
+	for t = mockTime + 1, t0 + 10 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	local again = self.mgr:processReport(report("arm", after(self.p, ARM_V, 10), ARM_V), mockTime)
+	lu.assertIs(again, arm)
+	lu.assertEquals(again.HarmAssessment.label, HAS.CONFIRMED)
+end
+
+function TestTrackReacquisitionSilent:test_aHeldArmSilentLongerThanItsLabelCrosses_waitsForItsOwnObject()
+	-- Past the longest gap its label crosses, a contact continuing the held ARM would take only its track, without the
+	-- label, and the ARM's own object would come back as a new, unlabeled track: the ARM waits for its own object.
+	local arm, t0 = self:silentArm(22)
+	lu.assertTrue(arm.HeldLost)
+	local q = after(self.p, ARM_V, 22)
+	local mate = self.mgr:processReport(report("mate", { x = q.x - 400, y = q.y, z = q.z + 300 }, ARM_V), mockTime)
+	lu.assertNotEquals(mate.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(mate.HarmAssessment)
+	mockTime = t0 + 24
+	local again = self.mgr:processReport(report("arm", after(self.p, ARM_V, 24), ARM_V), mockTime)
+	lu.assertIs(again, arm)
+	lu.assertEquals(again.HarmAssessment.label, HAS.CONFIRMED)
+end
+
+function TestTrackReacquisitionSilent:test_aJetSpeedContactBesideASilentArm_doesNotTakeItsLabel()
+	-- The only radar covering the ARM (a SAM radar looking every 2 s) shut down, so the ARM is lost to new contacts. A
+	-- jet-speed contact seen beside it is too slow to be it and does not take the label; the ARM's own next look
+	-- resumes it, confirmed.
+	local arm = self:silentArm(6)
+	local q = after(self.p, ARM_V, 6)
+	local jet = self.mgr:processReport(report("jet", { x = q.x - 500, y = q.y, z = q.z }, JET_V), mockTime)
+	lu.assertNotEquals(jet.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(jet.HarmAssessment)
+	for t = mockTime + 1, mockTime + 4 do
+		mockTime = t
+		self.mgr:pruneStale(t)
+	end
+	local again = self.mgr:processReport(report("arm", after(self.p, ARM_V, 10), ARM_V), mockTime)
+	lu.assertIs(again, arm)
+	lu.assertEquals(again.HarmAssessment.label, HAS.CONFIRMED)
+	lu.assertNil(arm.HeldLost)
+end
+
+function TestTrackReacquisitionSilent:test_aSilentTrackMergedAway_leavesTheLostList()
+	local arm = self:silentArm(6)
+	self.p = { x = 0, y = 6000, z = 200000 }
+	mockTime = mockTime + 1
+	local other = self.mgr:processReport(report("other", self.p, ARM_V), mockTime)
+	self.mgr:mergeTracks(other.TrackId, arm.TrackId, mockTime)
+	lu.assertNil(self.mgr._lost[arm.TrackId])
+end
+
+-- == A held ARM and the radars covering it, from the polls to the track ==
+-- An early-warning radar (10 s) and a SAM radar (2 s) are polled every 0.5 s; each look is throttled per object
+-- network-wide, so the track's looks come at the fastest radar's rate. A silent confirmed ARM is lost to new contacts
+-- only once the slowest radar still covering it has missed two of its looks too.
+
+TestTrackReacquisitionCover = {}
+
+function TestTrackReacquisitionCover:setUp()
+	setupMocks()
+	self.svc = Medusa.Services.SensorPollingService:new({ PerTrackScanUpdateRate = 5, SensorCleanupSec = 60 })
+	self.mgr = Medusa.Services.TrackManager:new({
+		geoGrid = GeoGrid(10000, { "Battery", "Track" }),
+		displayIdAllocator = Medusa.Services.TrackDisplayIdAllocator:new(),
+		evidenceReacquisition = true,
+	})
+	self.mgr:setCoverSource(self.svc)
+	self.rate = { ewr = 10, sam = 2 }
+	self.objs, self.sees = {}, {}
+	local w = self
+	GetGroupController = function(name)
+		return name
+	end
+	GetControllerDetectedTargets = function(c)
+		local out, f = {}, w.sees[c]
+		for _, o in ipairs(w.objs) do
+			if f and f(o.id_, mockTime) then
+				out[#out + 1] = { object = o }
+			end
+		end
+		return out
+	end
+end
+
+--- An ARM flying ARM_V, at (dx, 9000, dz) at t = 1000.
+function TestTrackReacquisitionCover:add(id, dx, dz)
+	local o = { id_ = id }
+	function o.getCategory()
+		return Object.Category.WEAPON
+	end
+	function o.getPoint()
+		return after({ x = dx, y = 9000, z = dz }, ARM_V, mockTime - 1000)
+	end
+	function o.getVelocity()
+		return { x = ARM_V.x, y = ARM_V.y, z = ARM_V.z }
+	end
+	function o.getName()
+		return id
+	end
+	self.objs[#self.objs + 1] = o
+end
+
+--- Poll both radars and prune every 0.5 s from t0 to t1.
+function TestTrackReacquisitionCover:run(t0, t1)
+	for t = t0, t1, 0.5 do
+		mockTime = t
+		for _, name in ipairs({ "ewr", "sam" }) do
+			local reports = self.svc:pollSensor(name, t, nil, self.rate[name])
+			for i = 1, #reports do
+				self.mgr:processReport(reports[i], t)
+			end
+		end
+		self.mgr:pruneStale(t)
+	end
+end
+
+function TestTrackReacquisitionCover:track(id)
+	return self.mgr:getStore():get(self.mgr:getTrackIdByNetworkId(id))
+end
+
+function TestTrackReacquisitionCover:test_aSlowRadarFirstSeeingTheArmAfterTheFastOneShutDown_keepsItsTrack()
+	-- The SAM radar alone saw the ARM and shut down; the early-warning radar detects it a second later, but its look
+	-- is throttled (the SAM reported it less than 10 s ago). A salvo mate seen beside it is a new track, and the
+	-- early-warning radar's report resumes the ARM, confirmed.
+	self:add("arm", 0, 0)
+	self.sees.sam = function(id, t)
+		return id == "arm" and t < 1010.2
+	end
+	self.sees.ewr = function(id, t)
+		return (id == "arm" and t >= 1011) or id == "mate"
+	end
+	self:run(1000, 1010)
+	local arm = self:track("arm")
+	confirmArm(arm, 980)
+	self:run(1010.5, 1015.5)
+	lu.assertNil(arm.HeldLost)
+	self:add("mate", -400, 300)
+	self:run(1016, 1016)
+	local mate = self:track("mate")
+	lu.assertNotEquals(mate.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(mate.HarmAssessment)
+	self:run(1016.5, 1021)
+	lu.assertIs(self:track("arm"), arm)
+	lu.assertTrue(arm.LastDetectionTime >= 1020)
+	lu.assertEquals(arm.HarmAssessment.label, HAS.CONFIRMED)
+end
+
+function TestTrackReacquisitionCover:test_aSlowRadarFirstSeeingTheArmAfterItWasLost_stillKeepsItsTrack()
+	-- The SAM radar alone saw the ARM and shut down; it is lost to new contacts after 4 s. The early-warning radar
+	-- first detects it a second later (its look throttled until 10 s after the SAM's last report): the ARM may be seen
+	-- again, so a salvo mate seen beside it does not take its track, and the early-warning radar's report resumes it.
+	self:add("arm", 0, 0)
+	self.sees.sam = function(id, t)
+		return id == "arm" and t < 1010.2
+	end
+	self.sees.ewr = function(id, t)
+		return (id == "arm" and t >= 1015) or id == "mate"
+	end
+	self:run(1000, 1010)
+	local arm = self:track("arm")
+	confirmArm(arm, 980)
+	self:run(1010.5, 1015.5)
+	lu.assertTrue(arm.HeldLost)
+	self:add("mate", -400, 300)
+	self:run(1016, 1016)
+	local mate = self:track("mate")
+	lu.assertNotEquals(mate.DisplayTrackId, arm.DisplayTrackId)
+	lu.assertNil(mate.HarmAssessment)
+	self:run(1016.5, 1021)
+	lu.assertIs(self:track("arm"), arm)
+	lu.assertTrue(arm.LastDetectionTime >= 1020)
+	lu.assertEquals(arm.HarmAssessment.label, HAS.CONFIRMED)
+end
+
+function TestTrackReacquisitionCover:test_aRadarThatLostTheArmEarlier_doesNotHoldItLongerThanItsOwnLooks()
+	-- The early-warning radar last detected the ARM at 1010 (diving under its horizon); the SAM radar tracked it on
+	-- to 1025 and shut down. Two of the early-warning radar's looks are missed at 1030: the ARM is lost then.
+	self:add("arm", 0, 0)
+	self.sees.sam = function(_, t)
+		return t < 1025.2
+	end
+	self.sees.ewr = function(_, t)
+		return t < 1010.2
+	end
+	self:run(1000, 1025)
+	local arm = self:track("arm")
+	confirmArm(arm, 980)
+	self:run(1025.5, 1030)
+	lu.assertNil(arm.HeldLost)
+	self:run(1030.5, 1031)
+	lu.assertTrue(arm.HeldLost)
+end
+
+function TestTrackReacquisitionCover:test_aBatteryThatSpeedsUpAndShutsDown_losesTheArmAtItsNewRate()
+	-- One battery searched every 5 s, then engaged (every 2 s) and shut down: no slower radar covers the ARM.
+	self:add("arm", 0, 0)
+	self.sees.sam = function(_, t)
+		return t < 1012.2
+	end
+	self.rate.sam = 5
+	self:run(1000, 1010)
+	local arm = self:track("arm")
+	confirmArm(arm, 980)
+	self.rate.sam = 2
+	self:run(1010.5, 1016)
+	lu.assertNil(arm.HeldLost)
+	self:run(1016.5, 1017)
+	lu.assertTrue(arm.HeldLost)
 end

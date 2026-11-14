@@ -1,5 +1,5 @@
--- [BKE] Turn off every Black Knight Edition behaviour that has a switch, to compare with stock Medusa 1.6.0
--- or keep an existing mission's ground defences as they were.
+-- [BKE] Turn off every Black Knight Edition behavior that has a switch, to compare with stock Medusa 1.6.0
+-- or keep an existing mission's ground defenses as they were.
 -- Put this in a DO SCRIPT action that runs before the DO SCRIPT FILE that loads medusa-bke.lua.
 --
 -- Still on, as corrections rather than options (no switch):
@@ -9,11 +9,11 @@
 -- - contact evidence: return size, launch cues, crews naming what they see within 10 km;
 -- - the released-store hold: a bomb dropped by a known aircraft is not confirmed as an ARM;
 -- - engage-air-weapons is not turned on when a battery goes HOT (stock turned it on every time);
--- - the stock fixes (point defence for batteries spawned after start, re-linking after crew suppression, quieter
+-- - the stock fixes (point defense for batteries spawned after start, re-linking after crew suppression, quieter
 --   event handlers, spreading heavy work over frames), the debrief log and BKE's INFO lines.
 -- Alert zones act only on trigger zones that carry a MedusaFlag or MedusaLosses property, so they need no switch.
--- Observer-post and listening-station name tokens (obs, observer, esm, elint) still mark those groups; with the
--- switches below they behave as ordinary ground groups.
+-- Observer-post name tokens (obs, observer) still mark those groups; with the switches below they behave as ordinary
+-- ground groups.
 MEDUSA_CONFIG = {
 	Networks = {
 		{
@@ -33,7 +33,6 @@ MEDUSA_CONFIG = {
 				LocalRadarSweeps = false,
 				ObserverReports = false,
 				LocalInitiative = false,
-				PassiveDetection = false,
 				-- With crew factors off, readiness and net load have no effect.
 				CrewFactors = false,
 				TrainingMode = false,

@@ -348,7 +348,7 @@ do
 	end
 
 	--- Positive aircraft evidence a crew can stand on: seen as an aircraft at sight range, or an aircraft-sized
-	--- return that once gained energy, climbed, turned hard or reacted to a launch. Behaviour alone is not enough:
+	--- return that once gained energy, climbed, turned hard or reacted to a launch. Behavior alone is not enough:
 	--- a cruise missile (small return) climbs and gains energy too.
 	function Svc.hasAircraftEvidence(track)
 		local seen = track.SeenAs
@@ -412,7 +412,7 @@ do
 	end
 
 	--- True when a PROBABLE decoy's glide is predicted to end within GLIDE_THREAT_RADIUS_M of a position (a battery,
-	--- or the site point defence protects): it is a munition threat there. A decoy flying over toward something else
+	--- or the site point defense protects): it is a munition threat there. A decoy flying over toward something else
 	--- is not.
 	function Svc.glideThreatens(track, pos)
 		local da = track.DecoyAssessment
@@ -449,7 +449,7 @@ do
 	local _batteryBuffer = {}
 
 	--- A battery whose reach is tallied: one DecoyResponseService decides for (a HOT long/medium-range battery that
-	--- is not point defence, for engage-air-weapons; any battery holding a test shot).
+	--- is not point defense, for engage-air-weapons; any battery holding a test shot).
 	local function tallied(b)
 		if not b.Position or (b.EngagementRangeMax or 0) <= 0 or b.OperationalStatus == DESTROYED then
 			return false

@@ -35,6 +35,7 @@ Medusa.Services.DiscoveryServiceDTO = {}
 ---@field _provider table|nil
 ---@field _listener table|nil
 ---@field _knownById table<number, Medusa.Services.DiscoveryServiceDTO>
+---@field _outsideById table<number, boolean> groups whose names place them outside this network
 ---@field _logger table
 ---@field _coalitionId number|nil
 ---@field _prefix string|nil
@@ -53,6 +54,7 @@ function Medusa.Services.DiscoveryService:new(provider, opts)
 		_provider = provider,
 		_listener = nil,
 		_knownById = {},
+		_outsideById = {},
 		_logger = Medusa.Logger:ns(
 			string.format(
 				"%sServices.Discovery",
@@ -100,7 +102,19 @@ function Medusa.Services.DiscoveryService:_buildDto(info, parsed)
 	}
 end
 
-function Medusa.Services.DiscoveryService:_defaultProviderList(coalitionId, knownById)
+--- Id of a group object from coalition.getGroups: read from the object itself, by name only if that fails.
+local function groupIdOf(g)
+	local ok, id = pcall(g.getID, g)
+	if ok and id then
+		return id
+	end
+	local name = GetGroupName(g)
+	return name and GetGroupID(name)
+end
+
+--- Groups of the coalition not yet known or placed outside the network. It runs on every periodic scan over every
+--- group of the coalition, so a group already decided costs one id read: no name or category lookups.
+function Medusa.Services.DiscoveryService:_defaultProviderList(coalitionId, knownById, outsideById)
 	local results = {}
 	local coalitionNum = coalitionId or 0
 
@@ -109,10 +123,10 @@ function Medusa.Services.DiscoveryService:_defaultProviderList(coalitionId, know
 		return results
 	end
 	for _, g in ipairs(groups) do
-		local name = GetGroupName(g)
-		if name then
-			local id = GetGroupID(name)
-			if id and not knownById[id] then
+		local id = groupIdOf(g)
+		if id and not knownById[id] and not (outsideById and outsideById[id]) then
+			local name = GetGroupName(g)
+			if name then
 				local category = GetGroupCategoryEx(g)
 				results[#results + 1] = {
 					groupId = id,
@@ -132,14 +146,18 @@ function Medusa.Services.DiscoveryService:scanOnce()
 
 	local list = (self._provider and self._provider.list)
 		or function(arg)
-			return self:_defaultProviderList(arg, self._knownById)
+			return self:_defaultProviderList(arg, self._knownById, self._outsideById)
 		end
 	local infos = list(coalitionId)
 	local added = 0
 
 	for _, info in ipairs(infos) do
-		if not self._knownById[info.groupId] then
+		if not self._knownById[info.groupId] and not self._outsideById[info.groupId] then
 			local parsed = Medusa.Services.GroupNameParser:parse(info.groupName, prefix)
+			if info.groupId and not (parsed and parsed.isManaged) then
+				-- a group's name never changes, so neither does this verdict
+				self._outsideById[info.groupId] = true
+			end
 			if parsed and parsed.isManaged then
 				local dto = self:_buildDto(info, parsed)
 				self._knownById[info.groupId] = dto

@@ -25,8 +25,9 @@ require("core.Chance")
       is known (doctrine LocalCueingRadars): a short-reach radar makes it an AAA battery with its own search radar, a
       long-reach one an early-warning radar with unmanaged guns.
     - Creates an observer post for a group named with the observer role token that is nothing else.
-    - Creates a listening station (an observer post marked Esm) for a group named with the esm/elint token that is
-      nothing else; with the observer token too, it is both.
+    - Creates an untrained lookout post (an observer post that is not a trained watcher) for a group named with the
+      esm/elint token that is nothing else, and logs that listening stations were removed; with the observer token
+      too, it is an observer post.
 
     How others use it
     - IadsNetwork's discovery listener calls createFromDTO to populate the battery, sensor, and C2 stores.
@@ -238,25 +239,36 @@ local function resolveWeaponRange(typeName, dcsRange)
 	return dcsRange
 end
 
-local SHELL_TYPE_PREFIX = "weapons.shells."
+local SHELL_TYPE_PREFIX = Medusa.Constants.SHELL_TYPE_PREFIX
 local AAA_FALLBACK_RANGE_M = 12000
 
 local function isShellType(typeName)
 	return type(typeName) == "string" and string.sub(typeName, 1, #SHELL_TYPE_PREFIX) == SHELL_TYPE_PREFIX
 end
 
+--- The unit's ammunition the battery fires: shells for an AAA battery, missiles otherwise. The third value is the set
+--- of the unit's shell type and display names, or nil when it carries no gun: a Tunguska's or a Pantsir's cannon is
+--- not in a SAM battery's ammunition, and a kill is told to be the gun's only by one of these names.
 function Medusa.Services.EntityFactory.extractAmmo(unitName, batteryRole)
 	local ammoTable = GetUnitAmmo(unitName)
 	if not ammoTable or #ammoTable == 0 then
-		return nil, 0
+		return nil, 0, nil
 	end
 
 	local isAaa = batteryRole == BR.AAA
+	local gunNames = nil
 	local ammoTypes = {}
 	for i = 1, #ammoTable do
 		local entry = ammoTable[i]
 		local desc = entry.desc
 		local shell = desc and isShellType(desc.typeName)
+		if shell then
+			gunNames = gunNames or {}
+			gunNames[desc.typeName] = true
+			if type(desc.displayName) == "string" and desc.displayName ~= "" then
+				gunNames[desc.displayName] = true
+			end
+		end
 		local accepted = isAaa and shell or (not isAaa and desc and desc.missileCategory)
 		if entry.count and entry.count > 0 and accepted then
 			local dcsRange = math.max(desc.rangeMaxAltMax or 0, desc.rangeMaxAltMin or 0)
@@ -289,9 +301,9 @@ function Medusa.Services.EntityFactory.extractAmmo(unitName, batteryRole)
 	end
 
 	if #ammoTypes == 0 then
-		return nil, 0
+		return nil, 0, gunNames
 	end
-	return ammoTypes, totalCount
+	return ammoTypes, totalCount, gunNames
 end
 
 local function createSensors(dto, stores, networkId, units, inventory, named)
@@ -386,13 +398,21 @@ local function createBatteryUnit(unit, unitId, batteryRole, roles, position, con
 	local initiallyDamaged = health and health.IsDamaged == true
 	local crewSkill = context.crewSkillIndex and context.crewSkillIndex:get(unitName) or nil
 
-	local ammoTypes, ammoCount = nil, 0
+	local ammoTypes, ammoCount, gunNames = nil, 0, nil
+	local ammoRead = false
 	if unitName then
 		for i = 1, #roles do
 			if Medusa.Entities.Battery.isAmmoBearingRole(batteryRole, roles[i]) then
-				ammoTypes, ammoCount = Medusa.Services.EntityFactory.extractAmmo(unitName, batteryRole)
+				ammoTypes, ammoCount, gunNames = Medusa.Services.EntityFactory.extractAmmo(unitName, batteryRole)
+				ammoRead = true
 				break
 			end
+		end
+		-- A gun grouped into a SAM site (a Shilka with an SA-6) fires none of the battery's ammunition; only its shell
+		-- names are kept, to tell its kills from the missiles'.
+		if not ammoRead and batteryRole ~= BR.AAA and hasRole(roles, BUR.AAA) then
+			local _, _, names = Medusa.Services.EntityFactory.extractAmmo(unitName, batteryRole)
+			gunNames = names
 		end
 	end
 
@@ -404,6 +424,7 @@ local function createBatteryUnit(unit, unitId, batteryRole, roles, position, con
 		Roles = roles,
 		AmmoCount = ammoCount,
 		AmmoTypes = ammoTypes,
+		GunNames = gunNames,
 		OperationalStatus = initiallyDamaged and Medusa.Constants.UnitOperationalStatus.DAMAGED
 			or Medusa.Constants.UnitOperationalStatus.ACTIVE,
 		LastKnownLife = life,
@@ -842,10 +863,18 @@ local function createObserverPost(dto, stores, networkId, units, inventory)
 		Position = position,
 		HierarchyPath = dto.parsed.echelonPath and table.concat(dto.parsed.echelonPath, ".") or nil,
 		Watch = hasNamedRole(dto, Role.OBSERVER),
-		Esm = hasNamedRole(dto, Role.ESM),
 	}))
-	local what = hasNamedRole(dto, Role.ESM) and "listening station" or "observer post"
-	logger:info(string.format("%s %s: %d crew units", what, dto.groupName, #names))
+	if hasNamedRole(dto, Role.ESM) then
+		logger:error(
+			string.format(
+				"group '%s': listening stations were removed (DCS gives scripts no radar state for player-flown "
+					.. "aircraft); the group is %s",
+				dto.groupName,
+				hasNamedRole(dto, Role.OBSERVER) and "an observer post" or "an untrained lookout post"
+			)
+		)
+	end
+	logger:info(string.format("observer post %s: %d crew units", dto.groupName, #names))
 	return "observer", 1
 end
 

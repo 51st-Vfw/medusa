@@ -226,3 +226,29 @@ function TestGroupNameParser:test_observer_token_respects_config_override()
 	Medusa.Config.Current = nil
 	Medusa.Config:initialize()
 end
+
+TestGroupNameParserEsmToken = {}
+
+function TestGroupNameParserEsmToken:test_esm_and_elint_tokens_still_mark_the_old_listening_station_role()
+	local r = Medusa.Services.GroupNameParser:parse("iads.1bn.esm.ridge", "iads")
+	lu.assertEquals(r.roles[1], Medusa.Constants.Role.ESM)
+	lu.assertEquals(r.unitLabel, "ridge")
+	lu.assertEquals(Medusa.Services.GroupNameParser:parse("iads.elint-2", "iads").roles[1], "ESM")
+	lu.assertEquals(#Medusa.Services.GroupNameParser:parse("iads.2bn.esmeralda", "iads").roles, 0)
+end
+
+function TestGroupNameParserEsmToken:test_a_configured_esm_token_still_marks_the_role()
+	MEDUSA_CONFIG = {
+		Roles = { ESM = "df" },
+		Networks = {
+			{ name = "T", coalition = (coalition and coalition.side and coalition.side.RED) or 1, prefix = "net" },
+		},
+	}
+	Medusa.Config.Current = nil
+	Medusa.Config:initialize()
+	local r = Medusa.Services.GroupNameParser:parse("net.1bn.df.ridge", "net")
+	lu.assertEquals(r.roles[1], Medusa.Constants.Role.ESM)
+	MEDUSA_CONFIG = nil
+	Medusa.Config.Current = nil
+	Medusa.Config:initialize()
+end

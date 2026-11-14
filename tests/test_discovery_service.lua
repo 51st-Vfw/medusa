@@ -150,3 +150,71 @@ function TestDiscoveryService:test_when_rescanned_should_not_duplicate_adds()
 	lu.assertEquals(a2, 0)
 	lu.assertEquals(added, 1)
 end
+
+-- The default provider lists every group of the coalition on every periodic scan, so a rescan must cost one id read
+-- per group: no by-name lookups for groups it already knows, and a group outside the network is parsed only once.
+local function fakeGroup(id, name)
+	return {
+		getID = function()
+			return id
+		end,
+		getName = function()
+			return name
+		end,
+		getCategoryEx = function()
+			return 2
+		end,
+	}
+end
+
+function TestDiscoveryService:test_rescan_reads_only_ids_of_known_and_outside_groups()
+	local red = (coalition and coalition.side and coalition.side.RED) or 1
+	local groups = { fakeGroup(31, "iads.alpha.sam.1bn"), fakeGroup(32, "convoy-1") }
+	local saved = {
+		GetCoalitionGroups = GetCoalitionGroups,
+		GetGroupID = GetGroupID,
+		GetGroupName = GetGroupName,
+		parse = Medusa.Services.GroupNameParser.parse,
+	}
+	local byName, nameReads, parsed = 0, 0, {}
+	GetCoalitionGroups = function()
+		return groups
+	end
+	GetGroupID = function(name)
+		byName = byName + 1
+		return saved.GetGroupID(name)
+	end
+	GetGroupName = function(g)
+		nameReads = nameReads + 1
+		return g:getName()
+	end
+	Medusa.Services.GroupNameParser.parse = function(parser, name, prefix)
+		parsed[name] = (parsed[name] or 0) + 1
+		return saved.parse(parser, name, prefix)
+	end
+	local ok, err = pcall(function()
+		local svc = Medusa.Services.DiscoveryService:new(nil, { coalitionId = red, prefix = "iads" })
+		local added = 0
+		svc:setListener({
+			onAdded = function()
+				added = added + 1
+			end,
+		})
+		svc:scanOnce()
+		lu.assertEquals(added, 1)
+		byName, nameReads = 0, 0
+
+		svc:scanOnce()
+		svc:scanOnce()
+
+		lu.assertEquals(added, 1)
+		lu.assertEquals(byName, 0)
+		lu.assertEquals(nameReads, 0)
+		lu.assertEquals(parsed["convoy-1"], 1)
+	end)
+	GetCoalitionGroups, GetGroupID, GetGroupName = saved.GetCoalitionGroups, saved.GetGroupID, saved.GetGroupName
+	Medusa.Services.GroupNameParser.parse = saved.parse
+	if not ok then
+		error(err, 0)
+	end
+end

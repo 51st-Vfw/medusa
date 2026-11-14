@@ -1,14 +1,14 @@
 # FAQ
 
 Questions about Black Knight Edition. For questions about Medusa itself (modded SAMs, both coalitions, performance,
-how point defence is assigned and more), see the official [FAQ](https://medusa.airdefense.systems/getting-started/faq/).
+how point defense is assigned and more), see the official [FAQ](https://medusa.airdefense.systems/getting-started/faq/).
 
 ## For mission makers
 
 ### Is BKE the official Medusa?
 
 No. The official Medusa is Zach Shepard's, at [github.com/medusa-iads/medusa](https://github.com/medusa-iads/medusa)
-and [medusa.airdefense.systems](https://medusa.airdefense.systems). BKE is a customised version for the 667th Black
+and [medusa.airdefense.systems](https://medusa.airdefense.systems). BKE is a customized version for the 667th Black
 Knights and the 51st VFW, based on Medusa 1.6.0.
 
 ### Will my Medusa mission work with BKE?
@@ -23,8 +23,8 @@ No. Load one of them: `medusa-bke.lua` or stock Medusa's `medusa.lua`, not both.
 
 ### Do I have to configure anything to get the BKE features?
 
-No. Every BKE feature is on by default except training mode. Observer posts and listening stations need a token in
-their group name (`obs`, `esm`); alert zones need properties on a trigger zone. Everything else works on the groups you
+No. Every BKE feature is on by default except training mode. Observer posts need a token in their group name
+(`obs`); alert zones need properties on a trigger zone. Everything else works on the groups you
 already have.
 
 ### My observer posts never report. Why?
@@ -38,7 +38,7 @@ nobody listening. The `crew roster` line in dcs.log lists each crew's skill; the
 
 ### Why does my SAM come up WARM when nothing is on its radar?
 
-A crew report, a crew's own sighting (local initiative) or a listening-station fix put a hostile within its reach. It
+A crew report or a crew's own sighting (local initiative) put a hostile within its reach. It
 comes up WARM (radar on, weapons hold) for two minutes so its own radar can find the aircraft. The `WAKE` line in the
 debrief log gives the reason. To keep an ambush site dark whatever the crews see, give its role an EMCON policy in the
 doctrine (for example `EMCON = { SR_SAM = "MINIMIZE" }`): a role the mission sets is never woken this way.
@@ -58,6 +58,14 @@ the radars track inside it; use it in ordinary editor triggers.
 
 Use [examples/bke-stock-behaviour-config.lua](../examples/bke-stock-behaviour-config.lua): it turns off everything BKE
 has a switch for. What remains (faster HARM calls, contact evidence, the released-store hold, the fixes) is always on.
+
+### Why do Medusa's duration metrics record nothing?
+
+DCS removes `os.clock` from mission scripts, so Medusa has no wall clock. It then times itself with mission model time,
+which does not move within a frame: every measurement would read 0. The log says at start which timer is in use
+(`timer: ...`). With model time the `medusa_*_duration_seconds` metrics record nothing
+(`medusa_crew_suppression_duration_seconds` is a mission-time length and is unaffected). A server that restores `os` in
+its `MissionScripting.lua` gets real figures.
 
 ### Where do I find what happened after a mission?
 
@@ -79,7 +87,9 @@ network's doctrine says. Your aircraft becomes hostile when the network finds th
 ### Do bombs make the SAMs shut down?
 
 No. A store that falls off a known aircraft and never speeds up on its own has no motor, so it is not called an ARM.
-Point defence still shoots at one falling on the site it protects. See [Released stores](released-stores.md).
+Nor is one seen too late to tie to its aircraft that falls like a bomb and will land clear of every air-defense
+battery. A guided bomb seen late can still be. Point defense still shoots at one falling on the site it protects. See
+[Released stores](released-stores.md).
 
 ### Do TALDs still work?
 
@@ -90,10 +100,8 @@ long- and medium-range SAMs stop engaging it. Turning hard, climbing or accelera
 
 ### Can the ground hear my radar?
 
-Yes, if the network has listening stations. A station hears your radar in its main beam out to about 250 km and its
-sidelobes close in, and takes a bearing. Several stations crossing their bearings can put the defences on alert
-around you. They cannot hear a radar that is off, and they cannot hear jammers. Radar silence pays. Whether DCS reports
-a player aircraft's radar to the stations has not been confirmed yet. See [ESM listening stations](esm-listening-stations.md).
+No. BKE 0.0.1 had listening stations that took bearings on aircraft radars. They were removed in 0.1.0 because DCS
+gives mission scripts no radar state for player-flown aircraft, so a station could not hear a player's jet.
 
 ### Can the ground see or hear me if I fly low?
 
@@ -102,7 +110,7 @@ through terrain) and hear low aircraft within about 3 km. Their reports are coar
 arrive, but they wake MANPAD teams and gun crews, bring up local radars and can bring a short-range SAM up WARM ahead
 of you.
 
-### Is there a way to practise without luck deciding the outcome?
+### Is there a way to practice without luck deciding the outcome?
 
 Ask your mission maker for training mode (doctrine `TrainingMode = true`). Medusa's own delays and detection ranges
 then take their typical values, no crew report is lost, and size estimates carry no noise, so a good run and a lucky

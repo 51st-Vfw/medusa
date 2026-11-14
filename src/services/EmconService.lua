@@ -158,12 +158,30 @@ local function _isEwrEligible(battery)
 	return battery.Position ~= nil
 end
 
+--- True when the network has an early-warning sensor group: any sensor group except a local cueing radar
+--- (LocalRadarService), which is dark until a threat comes near the units it supports and so gives no early warning,
+--- lit or not. A Dog Ear named with the ewr token is never a local cueing radar.
+local function _hasEarlyWarningSensor(sensorStore)
+	if not sensorStore or sensorStore:count() == 0 then
+		return false
+	end
+	local groupNames = sensorStore:getUniqueGroupNames()
+	for i = 1, #groupNames do
+		local sensors = sensorStore:getByGroupName(groupNames[i], _sensorBuffer)
+		local first = sensors[1]
+		if first and not first.IsLocalRadar then
+			return true
+		end
+	end
+	return false
+end
+
 local function _isSamAsEwrActive(doctrine, sensorStore)
 	local policy = doctrine.SAMAsEWR or "DISABLED"
 	if policy == "DISABLED" then
 		return false
 	end
-	if policy == "WHEN_NO_EWR" and sensorStore and sensorStore:count() > 0 then
+	if policy == "WHEN_NO_EWR" and _hasEarlyWarningSensor(sensorStore) then
 		return false
 	end
 	return true

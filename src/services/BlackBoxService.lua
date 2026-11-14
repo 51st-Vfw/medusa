@@ -108,6 +108,13 @@ do
 		return nil
 	end
 
+	local SHELL_TYPE_PREFIX = C.SHELL_TYPE_PREFIX
+
+	local function isShell(weapon)
+		local ok, typeName = pcall(weapon.getTypeName, weapon)
+		return ok and type(typeName) == "string" and typeName:sub(1, #SHELL_TYPE_PREFIX) == SHELL_TYPE_PREFIX
+	end
+
 	local function classify(record)
 		local descriptor = GetWeaponDesc(record.Weapon)
 		local category = descriptor and descriptor.category
@@ -181,6 +188,12 @@ do
 		end
 		if store:get(event.weapon) then
 			logger:debug(string.format("weapon already tracked: tracked=%d", store:size()))
+			return false
+		end
+		-- A gun shell has no explosive terminal to publish (classify rejects it), and a barrage of them must not
+		-- fill the tracker ahead of a bomb or missile.
+		if isShell(event.weapon) then
+			recordOutcome(C.CrewSuppressionWeaponOutcome.UNTRACKABLE)
 			return false
 		end
 		if store:isFull() then
@@ -328,7 +341,9 @@ do
 			return false
 		end
 		if not record.Classified then
-			local accepted = classify(record)
+			-- A weapon that has already ended has no descriptor to read (a gun shell can end within a tick of its
+			-- shot), and it was never sampled, so there is no terminal point to estimate either.
+			local accepted = IsWeaponExist(record.Weapon) ~= false and classify(record)
 			if not accepted then
 				recordOutcome(C.CrewSuppressionWeaponOutcome.UNTRACKABLE)
 				return false

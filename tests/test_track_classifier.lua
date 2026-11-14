@@ -18,13 +18,23 @@ require("services.TrackClassifier")
 
 local mockTime = 100
 
+local ulidCounter = 0
+local uniqueCounter = 0
+
+local function nextUnique()
+	uniqueCounter = uniqueCounter + 1
+	return uniqueCounter
+end
+
 local function setupMocks()
 	mockTime = 100
 	GetTime = function()
 		return mockTime
 	end
+	ulidCounter = 0
 	NewULID = function()
-		return string.format("ULID-%d", math.random(1, 999999))
+		ulidCounter = ulidCounter + 1
+		return string.format("ULID-%d", ulidCounter)
 	end
 end
 
@@ -32,7 +42,7 @@ local function makeTrack(overrides)
 	local base = {
 		Position = { x = 1000, y = 500, z = 2000 },
 		Velocity = { x = 100, y = 0, z = 50 },
-		NetworkId = overrides and overrides.NetworkId or string.format("net-%d", math.random(1, 999999)),
+		NetworkId = overrides and overrides.NetworkId or string.format("net-%d", nextUnique()),
 	}
 	if overrides then
 		for k, v in pairs(overrides) do

@@ -135,6 +135,31 @@ function TestBlackBoxWeaponTracker:test_rejects_newest_weapon_when_tracker_is_fu
 	lu.assertNil(store:get(newest))
 end
 
+function TestBlackBoxWeaponTracker:test_gun_shells_take_no_tracker_slot()
+	-- A shell has no explosive terminal to publish; a barrage of them must not crowd out a bomb.
+	local function shell(name)
+		return {
+			Name = name,
+			getTypeName = function()
+				return "weapons.shells.53-UOR-281U"
+			end,
+		}
+	end
+	local store = Medusa.Services.BlackBoxWeaponStore:new(2)
+	local descReads = 0
+	GetWeaponDesc = function()
+		descReads = descReads + 1
+		return descriptor(Weapon.Category.BOMB, 8, nil)
+	end
+	lu.assertFalse(Medusa.Services.BlackBoxService.onShot(store, { weapon = shell("s1") }, 1))
+	lu.assertFalse(Medusa.Services.BlackBoxService.onShot(store, { weapon = shell("s2") }, 1))
+	local bomb = weapon("bomb")
+	lu.assertTrue(Medusa.Services.BlackBoxService.onShot(store, { weapon = bomb }, 2))
+	lu.assertEquals(store:size(), 1)
+	lu.assertNotNil(store:get(bomb))
+	lu.assertEquals(descReads, 0)
+end
+
 function TestBlackBoxWeaponTracker:test_update_samples_only_the_budget_and_rotates_fairly()
 	local sampled = {}
 	GetWeaponDesc = function(w)
@@ -207,6 +232,26 @@ function TestBlackBoxWeaponTracker:test_hit_caches_classification_before_the_wea
 	lu.assertEquals(#self.impacts, 1)
 	lu.assertEquals(self.impacts[1].Position, target.Position)
 	lu.assertEquals(self.impacts[1].EffectiveExplosiveMassKg, 8)
+end
+
+function TestBlackBoxWeaponTracker:test_a_weapon_gone_before_its_first_sample_is_rejected_without_a_descriptor_read()
+	-- A gun shell can end within a tick of its shot; DCS then throws on getDesc.
+	local shell = weapon("shell")
+	local descReads = 0
+	GetWeaponDesc = function()
+		descReads = descReads + 1
+		return nil
+	end
+	IsWeaponExist = function()
+		return false
+	end
+	Medusa.Services.BlackBoxService.onShot(self.store, { weapon = shell }, 1)
+
+	self:update(2, 5)
+
+	lu.assertEquals(descReads, 0)
+	lu.assertEquals(#self.impacts, 0)
+	lu.assertEquals(self.store:size(), 0)
 end
 
 function TestBlackBoxWeaponTracker:test_disappearance_uses_last_sample_velocity_and_elapsed_time_for_terrain_intersection()

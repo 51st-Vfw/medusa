@@ -33,8 +33,9 @@ require("services.CrewFactorsService")
       cueing radar up at once; a dark SAM battery whose crew sees a hostile comes up WARM under the same rules as a
       report. Never under ROE HOLD, HARM shutdown or crew suppression.
     - Crew factors (doctrine CrewFactors, on by default; Constants.CrewFactors): the reporting group's crew skill
-      (the best mission-editor skill among its units; the doctrine's CrewSuppression.DefaultCrewSkill for units the
-      mission file does not list, such as groups spawned during the mission) and the network's readiness decide
+      (the best mission-editor skill among its units; the doctrine's CrewFactorsDefaultSkill, which follows
+      CrewSuppression.DefaultCrewSkill unless set, for units the mission file does not list, such as groups spawned
+      during the mission) and the network's readiness decide
       whether the crew calls it in at all, how fast and how precisely; readiness and net load decide whether the
       call reaches the right people (best when ALERTED with a calm net). Observer posts are trained watchers: they
       count one skill level higher (EXCELLENT stays), keep their full look rate when SURPRISED (other crews look half
@@ -122,10 +123,15 @@ local function rosterEntry(state, groupName, position, battery)
 	return entry
 end
 
---- The skill a crew falls back to: the doctrine's CrewSuppression.DefaultCrewSkill (AVERAGE by default).
+--- The report skill a crew of unknown skill falls back to: the doctrine's CrewFactorsDefaultSkill, else its
+--- CrewSuppression.DefaultCrewSkill, else AVERAGE.
 function Medusa.Services.ObserverReportService.defaultSkill(doctrine)
+	local skill = doctrine and doctrine.CrewFactorsDefaultSkill
+	if SKILL_LEVEL[skill] then
+		return skill
+	end
 	local cs = doctrine and doctrine.CrewSuppression
-	local skill = cs and cs.DefaultCrewSkill
+	skill = cs and cs.DefaultCrewSkill
 	return SKILL_LEVEL[skill] and skill or C.CrewSuppression.DEFAULT_CREW_SKILL
 end
 
@@ -139,8 +145,10 @@ end
 --- The skill of the crew that calls a report in: the best skill among the group's units. Battery units carry the
 --- skill resolved when the battery was built; other groups look their unit names up in the mission's skill index
 --- (Medusa.Services.MissionUnitSkillIndex, read once from the mission file at load). A unit the index does not
---- list (spawned during the mission, or a skill such as Random or Player) counts as the doctrine's default.
---- Returns the skill and true when no unit's skill was known (the group took the default).
+--- list (spawned during the mission, or a skill such as Random or Player) counts as the doctrine's report default
+--- (defaultSkill). A battery unit built without a mission skill carries the crew-suppression default, which may
+--- differ, so it too reports at the report default. Returns the skill and true when no unit's skill was known (the
+--- group took the default).
 function Medusa.Services.ObserverReportService.groupSkill(doctrine, skillIndex, battery, unitNames)
 	local best = nil
 	local defaulted = nil
@@ -162,7 +170,10 @@ function Medusa.Services.ObserverReportService.groupSkill(doctrine, skillIndex, 
 	if best then
 		return best, false
 	end
-	return better(nil, defaulted) or Medusa.Services.ObserverReportService.defaultSkill(doctrine), true
+	if doctrine then
+		return Medusa.Services.ObserverReportService.defaultSkill(doctrine), true
+	end
+	return better(nil, defaulted) or Medusa.Services.ObserverReportService.defaultSkill(nil), true
 end
 local groupSkill = Medusa.Services.ObserverReportService.groupSkill
 
@@ -219,7 +230,7 @@ local function rebuildRoster(ctx, state)
 			if position then
 				post.Position = position
 				local entry = rosterEntry(state, post.GroupName, position, nil)
-				-- A listening station's crew looks out too, but only a named observer post is a trained watcher.
+				-- An untrained lookout post's crew looks out too, but only a named observer post is a trained watcher.
 				entry.Observer = post.Watch ~= false
 				if ctx.crew then
 					entry.MissionSkill, entry.Defaulted =
@@ -228,8 +239,7 @@ local function rebuildRoster(ctx, state)
 				end
 				i = i + 1
 			else
-				local what = (post.Esm and post.Watch == false) and "listening station" or "observer post"
-				logger:info(string.format("%s %s: no crew left", what, post.GroupName))
+				logger:info(string.format("observer post %s: no crew left", post.GroupName))
 				ctx.observerStore:removeByGroupName(post.GroupName)
 			end
 		end
@@ -595,15 +605,13 @@ local function send(ctx, state, entry, seen)
 	return true
 end
 
---- Wakes the SAMs a hostile report brings up; their names go into `woken` (reused). Returns the count. `reason`
---- (default "observer_report") names the cause; `extraM` widens the reach by the report's own error.
-local function wakeSams(ctx, r, woken, reason, extraM)
+--- Wakes the SAMs a hostile report brings up; their names go into `woken` (reused). Returns the count.
+local function wakeSams(ctx, r, woken)
 	local grid = ctx.networkedGeoGrid
 	if not grid or not ctx.batteryStore or r.Identity ~= "hostile" or trackNear(ctx, r.Position) then
 		return 0
 	end
-	reason = reason or "observer_report"
-	local margin = OBS.WAKE_MARGIN_M + (extraM or 0)
+	local margin = OBS.WAKE_MARGIN_M
 	local radius = (ctx.maxEngagementRange or 0) + margin
 	local ids = grid:queryRadius(r.Position, radius, FILTER_BATTERY).BatteryIds or EMPTY
 	local count = 0
@@ -612,18 +620,13 @@ local function wakeSams(ctx, r, woken, reason, extraM)
 		if b and b.Position and mayWake(ctx, b) then
 			local reach = (b.EngagementRangeMax or 0) + margin
 			local dx, dz = b.Position.x - r.Position.x, b.Position.z - r.Position.z
-			if dx * dx + dz * dz <= reach * reach and holdWarm(b, ctx.now + OBS.WARM_HOLD_SEC, ctx.now, reason) then
+			if
+				dx * dx + dz * dz <= reach * reach
+				and holdWarm(b, ctx.now + OBS.WARM_HOLD_SEC, ctx.now, "observer_report")
+			then
 				count = count + 1
 				woken[count] = b.GroupName
-				logger:info(
-					string.format(
-						"%s wakes %s WARM (%s%s)",
-						(string.gsub(reason, "_", " ")),
-						b.GroupName,
-						reason == "observer_report" and "report from " or "from ",
-						r.From
-					)
-				)
+				logger:info(string.format("observer report wakes %s WARM (report from %s)", b.GroupName, r.From))
 			end
 		end
 	end
@@ -714,24 +717,6 @@ local function deliver(ctx, state, r)
 			Chance.isTraining(ctx.doctrine)
 		)
 	end
-end
-
-local cueReport = { Identity = "hostile", Position = nil, From = nil }
-
---- Cues the defences around a hostile `position` the network learned without a track (a listening-station fix):
---- MANPAD and gun crews near it, local cueing radars that cover it, and dark short- or medium-range SAMs whose reach
---- plus `errorM` covers it come up WARM (the same rules as a hostile observer report). Fills `woken` (reused) with the
---- woken SAMs' names. Returns crews cued, radars cued, SAMs woken.
-function Medusa.Services.ObserverReportService.cueHostileArea(ctx, position, from, reason, errorM, woken)
-	local crews = LocalRadarService.cueLocalDefences(ctx, position, MWR.OBSERVER)
-	local radars = LocalRadarService.cueFromReport(ctx, position, (string.gsub(reason, "_", " ")))
-	cueReport.Position, cueReport.From = position, from
-	local woke = wakeSams(ctx, cueReport, woken, reason, errorM)
-	cueReport.Position = nil
-	for i = woke + 1, #woken do
-		woken[i] = nil
-	end
-	return crews, radars, woke
 end
 
 local function processRadio(ctx, state)

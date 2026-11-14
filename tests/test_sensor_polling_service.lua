@@ -618,3 +618,89 @@ function TestContactEvidence:test_training_mode_takes_no_noise_draw_and_reads_th
 	lu.assertEquals(r.SizeDb, math.floor(truth + 0.5))
 	lu.assertEquals(self.draws, 0)
 end
+
+-- == The slowest radar still covering a contact ==
+
+TestSensorPollingServiceCover = {}
+
+function TestSensorPollingServiceCover:setUp()
+	setupMocks()
+	mockIdCounter = 0
+	self.svc = Medusa.Services.SensorPollingService:new({ PerTrackScanUpdateRate = 5, SensorCleanupSec = 60 })
+	self.obj = makeDcsObject("arm", { x = 0, y = 5000, z = 0 }, { x = 600, y = -50, z = 0 }, Object.Category.WEAPON)
+	self.sees = { sam = true, ewr = true }
+	local svc = self
+	GetGroupController = function(name)
+		return name
+	end
+	GetControllerDetectedTargets = function(controller)
+		if svc.sees[controller] then
+			return { { object = svc.obj } }
+		end
+		return {}
+	end
+end
+
+--- Poll the 2 s SAM radar and the 10 s early-warning radar every second from t0 to t1; returns the SAM's reports.
+function TestSensorPollingServiceCover:run(t0, t1)
+	local out = {}
+	for t = t0, t1 do
+		self.svc:pollSensor("ewr", t, nil, 10)
+		local r = self.svc:pollSensor("sam", t + 0.5, nil, 2)
+		if r and r[1] then
+			out[#out + 1] = r[1]
+		end
+	end
+	return out
+end
+
+function TestSensorPollingServiceCover:test_noRadarHasDetectedTheContact_nothingCoversIt()
+	lu.assertNil(self.svc:coveredUntil(self.obj.id_))
+end
+
+function TestSensorPollingServiceCover:test_theSlowestRadarStillDetectingTheContact_coversItForTwoOfItsLooks()
+	-- The SAM's looks keep the contact fresh (the early-warning radar's are throttled), yet the slower radar still
+	-- detects it on every poll: it can look again until two of its intervals after its last detection.
+	self:run(100, 120)
+	lu.assertEquals(self.svc:coveredUntil(self.obj.id_), 120 + 2 * 10)
+end
+
+function TestSensorPollingServiceCover:test_aRadarThatStopsDetectingTheContact_coversItOnlyUntilItsLooksAreMissed()
+	self:run(100, 110)
+	self.sees.ewr = false
+	self:run(111, 125)
+	lu.assertEquals(self.svc:coveredUntil(self.obj.id_), 110 + 2 * 10)
+	-- two of its intervals without a detection: only the SAM covers it
+	self:run(126, 140)
+	lu.assertEquals(self.svc:coveredUntil(self.obj.id_), 140.5 + 2 * 2)
+end
+
+function TestSensorPollingServiceCover:test_aRadarThatSpeedsUp_coversTheContactAtItsNewRate()
+	-- One battery looks every 5 s (search), then every 2 s (engaging): no slower radar covers the contact.
+	for t = 100, 110 do
+		self.svc:pollSensor("sam", t, nil, 5)
+	end
+	for t = 111, 114 do
+		self.svc:pollSensor("sam", t, nil, 2)
+	end
+	lu.assertEquals(self.svc:coveredUntil(self.obj.id_), 114 + 2 * 2)
+end
+
+function TestSensorPollingServiceCover:test_aSlowerRadarFirstDetectingTheContact_coversItAtOnce()
+	-- Its first look is throttled (the SAM reported it less than 10 s ago), yet it covers the contact from now on.
+	self.sees.ewr = false
+	self:run(100, 110)
+	self.sees.ewr = true
+	self.sees.sam = false
+	self:run(111, 111)
+	lu.assertEquals(self.svc:coveredUntil(self.obj.id_), 111 + 2 * 10)
+end
+
+function TestSensorPollingServiceCover:test_coverIsForgottenWithTheContact()
+	self:run(100, 101)
+	self.sees.ewr, self.sees.sam = false, false
+	self:run(200, 200)
+	lu.assertNil(self.svc._coverSec[self.obj.id_])
+	lu.assertNil(self.svc._coverAt[self.obj.id_])
+	lu.assertNil(self.svc._coverBy[self.obj.id_])
+end

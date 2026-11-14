@@ -34,7 +34,8 @@ Medusa.Constants.Role = {
 	AWACS = "AWACS",
 	HQ = "HQ",
 	OBSERVER = "OBSERVER",
-	-- Listening station (ESM / ELINT): a ground group that hears aircraft radars and takes bearings on them.
+	-- A group named with the esm/elint token. Listening stations were removed (DCS gives scripts no radar state for
+	-- player-flown aircraft); such a group is an untrained lookout post.
 	ESM = "ESM",
 }
 
@@ -383,6 +384,18 @@ Medusa.Constants.Reacquisition = {
 	-- mover lost for a minute or more is too vague to carry anything).
 	GRID_CELL_M = 10000,
 	GATE_MAX_M = 50000,
+	-- A confirmed ARM still held (within the track memory) is already lost to new contacts once it has been silent
+	-- for SILENT_LOOKS of its own refresh intervals (the time between its last two looks), and at least
+	-- SILENT_MIN_SEC: two looks missed in a row is a lost contact to an operator, one is not. The DCS object it holds
+	-- still resumes it until the memory runs out. Other held tracks wait for the memory to run out
+	-- (TrackReacquisition.mayBeTakenWhileHeld).
+	-- Looks come at the fastest covering radar's rate, so the slowest radar still covering it must have missed
+	-- SILENT_LOOKS of its own looks too (SensorPollingService.coveredUntil): when the fast radar shuts down, a slower
+	-- one's look may still be due. A radar covers a contact while it has detected it within COVER_FRESH_LOOKS of its
+	-- own intervals, throttled looks included.
+	SILENT_LOOKS = 2,
+	SILENT_MIN_SEC = 4,
+	COVER_FRESH_LOOKS = 2,
 	-- An ARM label crosses gaps up to this long (in recorded flights no jet ever took an ARM's track within 20 s).
 	ARM_LABEL_MAX_GAP_SEC = 20,
 	-- ...and only to a contact that keeps at least max(1 - ARM_MAX_SLOWDOWN_PER_SEC x gap, ARM_MIN_SPEED_KEPT) of the
@@ -445,6 +458,8 @@ Medusa.Constants.ROLLING_PK_STEP = 0.02
 Medusa.Constants.ROLLING_PK_CEILING = 0.60
 Medusa.Constants.ROLLING_PK_DECAY_TAU = 65.1 -- exponential decay time constant: 99% decay in ~300s (5 min)
 Medusa.Constants.SAM_AVG_MISSILE_SPEED_MPS = 800
+-- DCS names its gun shells weapons.shells.<name> (Weapon.getTypeName).
+Medusa.Constants.SHELL_TYPE_PREFIX = "weapons.shells."
 Medusa.Constants.TTK_ALT_FLOOR_M = 1524
 Medusa.Constants.TTK_ALT_CEIL_M = 9144
 Medusa.Constants.REARM_CHECK_INTERVAL_SEC = 600
@@ -687,6 +702,27 @@ Medusa.Constants.Release = {
 	-- A carrier confirmed as an ARM frees its children only when it had been tracked less than this when they were
 	-- linked (an ARM's flight) and has since lost its aircraft evidence.
 	FREE_MAX_CARRIER_AGE_SEC = 60,
+	-- A store first seen too late to link to its aircraft is still not confirmed as an ARM while it falls like a bomb
+	-- that cannot reach a radar (HarmDetectionService.observeFall, confirm block "ballistic"). Between two looks, its
+	-- acceleration less gravity splits into thrust less drag (along the velocity) and lift (across it). A look counts
+	-- when lift is at most BALLISTIC_MAX_LIFT_MPS2 and the along part at most BALLISTIC_MAX_THRUST_MPS2 (a bomb's drag
+	-- only slows it), and only while gravity across the velocity (g cos of the flight-path angle) is at least
+	-- BALLISTIC_MIN_GCOS_MPS2: a steep dive needs no lift to fly straight, so it cannot tell a bomb from a guided
+	-- weapon. An along gain of BALLISTIC_MOTOR_MPS2 is a motor: never ballistic again. BALLISTIC_MIN_LOOKS such looks
+	-- in a row, a predicted landing (gravity and the drag seen) at least BALLISTIC_MIN_MISS_M from every battery (one
+	-- shut down included), and an aircraft within BALLISTIC_CARRIER_RADIUS_M that had at least the store's energy
+	-- height less BALLISTIC_CARRIER_MARGIN_M in its last PARENT_ENERGY_WINDOW_SEC block the confirmation. In DCS an ARM
+	-- can coast without lift after its motor burns out: its predicted landing still lies near its radar (an AGM-45),
+	-- and a lofted one (a Kh-58) has far more energy than the aircraft near it. A guided bomb's lift (about 8 m/s2 for
+	-- a GBU-31) is not ballistic.
+	BALLISTIC_MAX_LIFT_MPS2 = 0.75,
+	BALLISTIC_MAX_THRUST_MPS2 = 0.5,
+	BALLISTIC_MIN_GCOS_MPS2 = 3,
+	BALLISTIC_MOTOR_MPS2 = 5,
+	BALLISTIC_MIN_LOOKS = 3,
+	BALLISTIC_MIN_MISS_M = 3000,
+	BALLISTIC_CARRIER_RADIUS_M = 40000,
+	BALLISTIC_CARRIER_MARGIN_M = 3000,
 }
 
 -- ── Decoy assessment, engage-air-weapons, test shot ──────────────
@@ -719,7 +755,7 @@ Medusa.Constants.Decoy = {
 	STRAIGHT_LEG_RAD = math.rad(10),
 	SUSPECT_SEC = 60,
 	PROBABLE_SEC = 90,
-	-- Behaviour an unpowered decoy cannot show, judged on two scans in a row (never one): an energy gain (thrust),
+	-- Behavior an unpowered decoy cannot show, judged on two scans in a row (never one): an energy gain (thrust),
 	-- a sustained climb (mean vertical speed over the window) or a hard turn (heading rate between scans; recorded
 	-- TALDs never exceeded 0.9 deg/s, jets reach 10-20 deg/s).
 	GAIN_MPS = 5,
@@ -728,7 +764,7 @@ Medusa.Constants.Decoy = {
 	DISPROOF_SCANS = 2,
 	-- Holding energy is proof of power too: a loss under speed / HOLD_GLIDE_RATIO (flatter than any glide) on every
 	-- scan for HOLD_SEC of track time (two windows). And a SUSPECT or PROBABLE contact still flying when any glide
-	-- from where it was labelled would be over (its energy height above GLIDE_MIN_SPEED_MPS at ground level, at
+	-- from where it was labeled would be over (its energy height above GLIDE_MIN_SPEED_MPS at ground level, at
 	-- GLIDE_RATIO_MAX and that slowest speed) is no glider.
 	HOLD_GLIDE_RATIO = 30,
 	HOLD_SEC = 40,
@@ -774,7 +810,7 @@ Medusa.Constants.Decoy = {
 	TEST_SHOT_MAX_HOLD_SEC = 90,
 	-- A test-shot missile (held at launch, even if the hold ended early) whose flight ends farther than this from its
 	-- live target lost guidance under the hold: no evidence, and no battery of the network with that launcher type
-	-- makes test shots again. Proximity-fused SAMs detonate within a few hundred metres of a target they guide on;
+	-- makes test shots again. Proximity-fused SAMs detonate within a few hundred meters of a target they guide on;
 	-- measured in DCS, unheld SA-11 misses 126-201 m, held 0.5 s after launch 17.9 km.
 	TEST_SHOT_LOST_MISS_M = 2000,
 	-- ... but only when the verdict is sound; otherwise no verdict (no evidence, nothing learned): the target was
@@ -786,7 +822,7 @@ Medusa.Constants.Decoy = {
 	-- multi-target engagement radar) plus a pass.
 	TEST_SHOT_FRESH_SEC = 6,
 	TEST_SHOT_LOST_MIN_TO_GO_SEC = 8,
-	-- Batteries whose engage-air-weapons switch is managed (point defence and SHORAD keep it on).
+	-- Batteries whose engage-air-weapons switch is managed (point defense and SHORAD keep it on).
 	MANAGED_ROLES = { VLR_SAM = true, LR_SAM = true, MR_SAM = true },
 	-- Fire discipline (DecoyFireDiscipline): a HOT long/medium-range battery whose own fire-control radar locks a
 	-- probable decoy, or that fires at one, turns engage-air-weapons off for FIRE_HOLD_SEC. Measured in DCS: with
@@ -796,7 +832,7 @@ Medusa.Constants.Decoy = {
 	-- A hold's time and count start when the option actually goes off (not while its write waits). None past
 	-- FIRE_HOLD_BUDGET_SEC of holds in any FIRE_HOLD_BUDGET_WINDOW_SEC, enough to cover a battery under HARM attack
 	-- with decoys in the raid. Anti-radiation missiles do not end a hold: the HARM shutdown response and point
-	-- defence handle them, and a battery whose holds end when an ARM inbound appears goes back to firing at the
+	-- defense handle them, and a battery whose holds end when an ARM inbound appears goes back to firing at the
 	-- decoys rather than the ARMs (measured in DCS). The fire-control radars are read at most every
 	-- FIRE_HOLD_LOCK_READ_SEC; a
 	-- decoy's count is forgotten FIRE_HOLD_COUNT_FORGET_SEC after its last hold (longer than any glide).
@@ -1018,7 +1054,7 @@ Medusa.Constants.LocalRadar = {
 
 -- Sight from the ground, shared by radar crews (ContactEvidence.SIGHT_RECOGNITION_RANGE_M) and observers
 -- (Observer.VISUAL_RANGE_DAY_M): both are day figures, scaled by the light and capped by the mission's weather
--- (visibility, fog, dust), read once at load. Clouds are not modelled.
+-- (visibility, fog, dust), read once at load. Clouds are not modeled.
 Medusa.Constants.Sight = {
 	-- At night (IsNightTime: 19:00-07:00) unaided eyes see a dark aircraft at a quarter of the day distance.
 	NIGHT_FACTOR = 0.25,
@@ -1087,100 +1123,6 @@ Medusa.Constants.Observer = {
 	KEEP_SEC = 180,
 	-- The roster of observing groups is rebuilt from the stores this often.
 	ROSTER_REFRESH_SEC = 30,
-}
-
--- ── Listening stations (ESM) ──────────────────────────────────────
--- Passive direction finding on airborne radars (EsmService). Distances in metres, angles in degrees unless named.
--- Doctrine PassiveDetection switches it; doctrine ESM holds the numbers a mission may change (MastHeightM, MaxRangeKm,
--- SidelobeRangeKm, AewMaxRangeKm, BearingSigmaDeg, LookIntervalSec).
-Medusa.Constants.Esm = {
-	DEFAULT_MAST_HEIGHT_M = 10,
-	DEFAULT_MAX_RANGE_KM = 250,
-	-- Sidelobes: about -30 dB below the main beam, but a sensitive receiver close in still hears them.
-	DEFAULT_SIDELOBE_RANGE_KM = 40,
-	-- A rotating early-warning radar is heard out to the radio horizon; this caps it.
-	DEFAULT_AEW_MAX_RANGE_KM = 400,
-	DEFAULT_BEARING_SIGMA_DEG = 2,
-	DEFAULT_LOOK_INTERVAL_SEC = 10,
-	-- Radio horizon over a 4/3 earth: d = 4120 * (sqrt(h1) + sqrt(h2)) metres, heights in metres; the same earth
-	-- (radius 4/3 x 6371 km) bends the elevation angle.
-	HORIZON_K_M = 4120,
-	EARTH_EFFECTIVE_RADIUS_M = 8494667,
-	-- A searching airborne radar covers about +-60 degrees of its nose; locked on a target, its beam stays on that
-	-- target (within BEAM_HALF_DEG of the line to it) while track-while-scan and the short searches between still
-	-- sweep the sector part of the time.
-	SCAN_HALF_DEG = 60,
-	BEAM_HALF_DEG = 5,
-	-- Chance one look catches the radar: a scanning beam paints the station only part of the time; a locked radar's
-	-- sector less often; a rotating early-warning antenna every turn; a beam held this way always; sidelobes are weak.
-	INTERCEPT_SCAN = 0.7,
-	INTERCEPT_LOCKED_SCAN = 0.3,
-	INTERCEPT_AEW = 0.95,
-	INTERCEPT_HELD = 1.0,
-	INTERCEPT_SIDELOBE = 0.4,
-	-- A sidelobe signal is weak: its bearing error is half again as large.
-	SIDELOBE_SIGMA_FACTOR = 1.5,
-	-- Below about 1 degree of elevation ground multipath bends the wavefront: the bearing error doubles.
-	GRAZING_DEG = 1,
-	GRAZING_SIGMA_FACTOR = 2,
-	-- Two radars of the same class within MERGE_SIGMAS bearing errors of each other look like one to a station.
-	MERGE_SIGMAS = 2,
-	-- A station sorts out at most this many radars of one class at a time; more and that sector is saturated (the
-	-- extra bearings are lost and everything of that class it hears stays ambiguous).
-	MAX_BEARINGS_PER_CLASS = 8,
-	-- Bearings cross usefully only between MIN_CROSS_DEG and 180 - MIN_CROSS_DEG.
-	MIN_CROSS_DEG = 15,
-	-- A third bearing confirms a crossing when the three-bearing least-squares fit's chi-square (sum of squared misses
-	-- in bearing errors) is at most CHI2_MAX: three bearings, two unknowns, one degree of freedom; 6.6 is its 99%
-	-- point, so a true crossing passes 99 times in 100 and a ghost needs the third bearing within about 2.6 errors.
-	CHI2_MAX = 6.6,
-	-- A confirmed crossing is a fix only when no rival explanation of its bearings (another aircraft's bearing at one
-	-- of its stations) is plausible: a three-bearing crossing that fits within CHI2_PLAUSIBLE (too poor for a fix
-	-- itself, but possible), or a two-bearing one when CHI2_MISS is no more than the fix's own chi-square.
-	CHI2_PLAUSIBLE = 11,
-	-- A two-bearing explanation needs the third station to have missed the radar: it costs -2 ln(1 - 0.7) = 2.4 in
-	-- chi-square, and is a rival of any three-bearing fix that fits worse than that.
-	CHI2_MISS = 2.4,
-	-- A further station's bearing joins a fix when it raises the chi-square by at most CHI2_MAX.
-	-- The first, loose angle test around a crossing uses its error capped here.
-	GATE_ERROR_CAP_M = 15000,
-	-- A crossing may lie this far beyond its reach (the bearings' own error).
-	RANGE_SLACK = 1.1,
-	-- A fix of only two bearings is trusted when the next look puts a two-bearing fix of that class within its gate
-	-- (three combined errors plus what a jet flies in between, MOVE_MPS).
-	MOVE_MPS = 350,
-	REPEAT_GATE_SIGMAS = 3,
-	-- A fix this good or better (1-sigma, semi-major axis) cues defences; a worse one is readiness evidence only.
-	CUE_MAX_ERROR_M = 10000,
-	-- A cued area rests this long before the same 20 km cell cues again; coarse fixes are logged as often.
-	CUE_CELL_M = 20000,
-	CUE_REST_SEC = 60,
-	-- Bearings go to the network by data link: a fix is ready a few seconds after the look ends.
-	DELAY_MIN_SEC = 2,
-	DELAY_MAX_SEC = 6,
-	MAX_PENDING = 8,
-	-- Readiness: a fire-control radar fix, or fire-control radars heard on READINESS_LOOKS looks within
-	-- READINESS_WINDOW_SEC, is hostile evidence; an early-warning radar alone never is (an AWACS orbit is routine).
-	READINESS_LOOKS = 3,
-	READINESS_WINDOW_SEC = 120,
-	-- Debrief rate limits: an intercept per station, class and 30-degree sector; ambiguity per class.
-	SECTOR_DEG = 30,
-	INTERCEPT_REST_SEC = 300,
-	AMBIGUOUS_REST_SEC = 60,
-	-- Per look at most MAX_EMITTERS radars near enough to matter are listened to, taken in turn when there are more
-	-- (MAX_SEEN read at most).
-	MAX_EMITTERS = 64,
-	MAX_SEEN = 256,
-	-- Work per tick: emitters one station checks; matching work (one unit per crossing, one per third-bearing fit tried);
-	LISTEN_PER_TICK = 32,
-	MATCH_WORK_PER_TICK = 256,
-	MAX_CANDIDATES = 512,
-	-- Fix-grade crossings checked for rivals per tick.
-	RESOLVE_PER_TICK = 64,
-	-- Station list refresh.
-	ROSTER_REFRESH_SEC = 30,
-	-- Summary log line (work done, time taken).
-	SUMMARY_SEC = 120,
 }
 
 Medusa.Constants.ObserverReportState = {

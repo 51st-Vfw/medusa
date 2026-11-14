@@ -3,9 +3,9 @@
 -- You only need the fields you change: leaving a field out keeps its default. Every field is described in
 -- docs/doctrine-fields.md and docs/configuration.md.
 MEDUSA_CONFIG = {
-	-- Group-name tokens. OBSERVER marks observer posts ("observer" always works too); ESM marks listening stations
-	-- ("elint" always works too). The stock tokens are shown for completeness.
-	Roles = { HQ = "hq", GCI = "gci", EWR = "ewr", AWACS = "awacs", OBSERVER = "obs", ESM = "esm" },
+	-- Group-name tokens. OBSERVER marks observer posts ("observer" always works too). The stock tokens are shown for
+	-- completeness.
+	Roles = { HQ = "hq", GCI = "gci", EWR = "ewr", AWACS = "awacs", OBSERVER = "obs" },
 	Networks = {
 		{
 			name = "BKE_EXAMPLE",
@@ -16,7 +16,7 @@ MEDUSA_CONFIG = {
 				-- Track refresh per radar kind, in seconds: early-warning/GCI radar, SAM search radar, HOT
 				-- multi-target engagement radar. Each is capped at half of TrackMemorySec.
 				ScanUpdateRateSec = { EWR = 10, SAM_SEARCH = 5, SAM_TRACK = 2 },
-				-- Decoys: recognise gliding decoys (TALD) and keep long/medium-range SAMs from wasting missiles on
+				-- Decoys: recognize gliding decoys (TALD) and keep long/medium-range SAMs from wasting missiles on
 				-- them. DecoyAssessment off also turns the other three off; DecoyFireDiscipline needs
 				-- ManageEngageAirWeapons.
 				DecoyAssessment = true,
@@ -35,17 +35,6 @@ MEDUSA_CONFIG = {
 				ObserverReports = true,
 				-- A crew that sees an aircraft itself brings its own radar up without waiting for the network.
 				LocalInitiative = true,
-				-- Listening stations ("esm" / "elint" in the group name) take bearings on hostile aircraft radars and
-				-- cross them into fixes; jets with their radar off are not heard.
-				PassiveDetection = true,
-				ESM = {
-					MastHeightM = 10,
-					MaxRangeKm = 250,
-					SidelobeRangeKm = 40,
-					AewMaxRangeKm = 400,
-					BearingSigmaDeg = 2,
-					LookIntervalSec = 10,
-				},
 				-- Starting readiness: SURPRISED, ALERTED or ENGAGED. It has no default of its own: leave it out to
 				-- follow Posture (HOT_WAR = ENGAGED, WARM_WAR = ALERTED, COLD_WAR = SURPRISED). It rises during the
 				-- mission on its own; a script can set it with Medusa.API.setReadiness("BKE_EXAMPLE", "ALERTED").
@@ -54,9 +43,12 @@ MEDUSA_CONFIG = {
 				-- fast a busy network identifies tracks. Off: fixed report timings, no readiness effects.
 				CrewFactors = true,
 				-- The skill of units the mission gives none (spawned during the mission, or Random/Player skill):
-				-- their crew-suppression resistance and, in BKE, their reporting skill. An Average crew reports
-				-- about one time in four: set your ground crews' and observer posts' skill in the editor.
+				-- their crew-suppression resistance and, unless CrewFactorsDefaultSkill is set, their reporting
+				-- skill. An Average crew reports about one time in four: set your ground crews' and observer posts'
+				-- skill in the editor.
 				CrewSuppression = { DefaultCrewSkill = "AVERAGE" },
+				-- The reporting skill of those units alone; leave it out to follow CrewSuppression.DefaultCrewSkill.
+				CrewFactorsDefaultSkill = "AVERAGE",
 				-- Training: no luck in Medusa's own detection, identification and reports (typical values, no lost
 				-- reports, fixed typical errors). DCS's own randomness stays.
 				TrainingMode = false,

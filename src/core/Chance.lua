@@ -11,8 +11,7 @@ require("_header")
     What this module does
     - The one place the sensing, identification and report chain draws its luck: return-size noise, observer looks,
       reports, delays, losses and position error, identification timers, MANPAD wake timing and hearing range, local
-      radar sweep timing and readiness delays, listening-station intercepts and bearing errors. AAA fire, crew
-      suppression and probe names draw their own.
+      radar sweep timing and readiness delays. AAA fire, crew suppression and probe names draw their own.
     - Every draw takes the network's training flag (doctrine TrainingMode) and an optional random source ([0,1),
       injectable for tests; math.random, read at call time, by default).
     - Outside training a draw makes the same random() calls, in the same order, as the plain expression it stands
@@ -24,7 +23,7 @@ require("_header")
       is outside Medusa and stays.
 
     How others use it
-    - Services call Medusa.Chance.uniform / symmetric / gauss / gaussError / chance / mishap with
+    - Services call Medusa.Chance.uniform / symmetric / gauss / chance / mishap with
       isTraining(doctrine); hash and fraction turn a name into a fixed number for the training phase and direction.
 --]]
 
@@ -90,21 +89,6 @@ function Medusa.Chance.gauss(training, random)
 	random = random or math.random
 	local u1 = 1 - random()
 	return math.sqrt(-2 * math.log(u1)) * math.cos(TWO_PI * random())
-end
-
-local MEAN_ABS_GAUSS = math.sqrt(2 / math.pi) -- E|N(0,1)|, about 0.8
-
---- A standard Gaussian measurement error (a listening station's bearing). Outside training the same draws as
---- gauss; in training, with a whole-number `seed`, its expected size (E|N(0,1)| = 0.8) with the sign of the seed's
---- lowest bit, so the error is deterministic but not perfect; without a seed zero.
-function Medusa.Chance.gaussError(training, random, seed)
-	if training then
-		if seed then
-			return seed % 2 == 0 and MEAN_ABS_GAUSS or -MEAN_ABS_GAUSS
-		end
-		return 0
-	end
-	return Medusa.Chance.gauss(false, random)
 end
 
 --- An IADS step that succeeds with probability p (a report is made, a report gets through): random() < p; always

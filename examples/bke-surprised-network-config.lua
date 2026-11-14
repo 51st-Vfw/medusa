@@ -4,10 +4,9 @@
 --
 -- While SURPRISED, crews look for aircraft less often (observer posts keep watching), make fewer and slower reports,
 -- 40% of reports reach nobody who acts on them (20% for observer posts), and sleeping MANPAD teams do not watch the
--- sky. The network turns ALERTED 2-5 minutes after word first spreads (a hostile track, a hostile report, or
--- fire-control radars heard by listening stations), and ENGAGED at its first missile launch or 30-90 s after its first
--- loss. Skilled crews shrug surprise off faster: set your ground crews' and observer posts' skill above Average.
--- Readiness needs CrewFactors (on by default).
+-- sky. The network turns ALERTED 2-5 minutes after word first spreads (a hostile track or a hostile report), and
+-- ENGAGED at its first missile launch or 30-90 s after its first loss. Skilled crews shrug surprise off faster: set
+-- your ground crews' and observer posts' skill above Average. Readiness needs CrewFactors (on by default).
 --
 -- A mission script can change readiness at any time (DO SCRIPT actions run by triggers, after medusa-bke.lua):
 --

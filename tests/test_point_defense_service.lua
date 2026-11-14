@@ -106,6 +106,7 @@ local function makeCtx(fields)
 		batteryStore = fields.batteryStore,
 		geoGrid = fields.geoGrid,
 		now = fields.now or 1000,
+		pointDefenseTies = fields.pointDefenseTies,
 	}
 end
 
@@ -225,6 +226,28 @@ function TestAutoAssignShorad:test_assigns_sr_sam_to_nearby_lr_sam()
 	lu.assertTrue(sr.IsPointDefense)
 	lu.assertEquals(sr.PointDefenseTargetId, "LR-1")
 	lu.assertEquals(lr.PointDefenseProviderId, "SR-1")
+end
+
+function TestAutoAssignShorad:test_assigns_sr_sam_to_nearby_vlr_sam()
+	local sr = makeBattery({
+		BatteryId = "SR-1",
+		Role = BR.SR_SAM,
+		Position = { x = 1000, y = 0, z = 1000 },
+	})
+	local vlr = makeBattery({
+		BatteryId = "VLR-1",
+		Role = BR.VLR_SAM,
+		Position = { x = 2000, y = 0, z = 2000 },
+	})
+	self.batteryStore:add(sr)
+	self.batteryStore:add(vlr)
+	self.geoGrid:add("Battery", sr.BatteryId, sr.Position)
+	self.geoGrid:add("Battery", vlr.BatteryId, vlr.Position)
+
+	local count = PDS.autoAssignShorad(makeCtx({ batteryStore = self.batteryStore, geoGrid = self.geoGrid }))
+	lu.assertEquals(count, 1)
+	lu.assertEquals(sr.PointDefenseTargetId, "VLR-1")
+	lu.assertEquals(vlr.PointDefenseProviderId, "SR-1")
 end
 
 function TestAutoAssignShorad:test_skips_independent_aaa()
@@ -402,6 +425,40 @@ function TestActivateForHarm:test_assigned_provider_uses_full_engagement_range()
 	lu.assertEquals(count, 1)
 	lu.assertEquals(provider.CurrentTargetTrackId, harm.TrackId)
 	lu.assertEquals(provider.ActivationState, AS.STATE_HOT)
+end
+
+function TestActivateForHarm:test_pd_beside_vlr_sam_goes_hot_for_harm_aimed_at_it()
+	local vlr = makeBattery({
+		BatteryId = "VLR-1",
+		Role = BR.VLR_SAM,
+		Position = { x = 0, y = 0, z = 0 },
+	})
+	local gunPd = makeBattery({
+		BatteryId = "SR-1",
+		Role = BR.SR_SAM,
+		Position = { x = 0, y = 0, z = 1000 },
+		EngagementRangeMax = 8000,
+		TotalAmmoStatus = 8,
+		ActivationState = AS.STATE_WARM,
+	})
+	self.batteryStore:add(vlr)
+	self.batteryStore:add(gunPd)
+	self.geoGrid:add("Battery", vlr.BatteryId, vlr.Position)
+	self.geoGrid:add("Battery", gunPd.BatteryId, gunPd.Position)
+	PDS.autoAssignShorad(makeCtx({ batteryStore = self.batteryStore, geoGrid = self.geoGrid }))
+
+	local harm = makeTrack({
+		TrackId = "HARM-1",
+		AssessedAircraftType = "HARM",
+		Position = { x = 10000, y = 0, z = 0 },
+		Velocity = { x = -600, y = 0, z = 0 },
+	})
+
+	local count = PDS.activateForHarm(harm, self.geoGrid, self.batteryStore, 1000, self.doctrine)
+
+	lu.assertEquals(count, 1)
+	lu.assertEquals(gunPd.CurrentTargetTrackId, harm.TrackId)
+	lu.assertEquals(gunPd.ActivationState, AS.STATE_HOT)
 end
 
 function TestActivateForHarm:test_opportunistic_provider_uses_full_engagement_range()
@@ -610,4 +667,278 @@ function TestEngageThreats:test_returns_zero_with_no_protected_batteries()
 		makeCtx({ trackStore = self.trackStore, batteryStore = self.batteryStore, geoGrid = self.geoGrid })
 	)
 	lu.assertEquals(count, 0)
+end
+
+-- == [BKE] Several providers per protected battery ==
+
+TestSeveralProviders = {}
+
+function TestSeveralProviders:setUp()
+	setupMocks()
+	self.batteryStore = Medusa.Services.BatteryStore:new()
+end
+
+function TestSeveralProviders:test_two_providers_both_linked()
+	local pd1 = makeBattery({ BatteryId = "PD-1", Role = BR.SR_SAM })
+	local pd2 = makeBattery({ BatteryId = "PD-2", Role = BR.SR_SAM })
+	local hva = makeBattery({ BatteryId = "HVA-1", Role = BR.LR_SAM })
+	self.batteryStore:add(pd1)
+	self.batteryStore:add(pd2)
+	self.batteryStore:add(hva)
+
+	lu.assertTrue(PDS.setAssignment("PD-1", "HVA-1", self.batteryStore))
+	lu.assertTrue(PDS.setAssignment("PD-2", "HVA-1", self.batteryStore))
+	lu.assertEquals(hva.PointDefenseProviderIds, { "PD-1", "PD-2" })
+	lu.assertEquals(hva.PointDefenseProviderId, "PD-1")
+	lu.assertEquals(pd2.PointDefenseTargetId, "HVA-1")
+end
+
+function TestSeveralProviders:test_clearing_one_keeps_the_other()
+	local pd1 = makeBattery({ BatteryId = "PD-1", Role = BR.SR_SAM })
+	local pd2 = makeBattery({ BatteryId = "PD-2", Role = BR.SR_SAM })
+	local hva = makeBattery({ BatteryId = "HVA-1", Role = BR.LR_SAM })
+	self.batteryStore:add(pd1)
+	self.batteryStore:add(pd2)
+	self.batteryStore:add(hva)
+	PDS.setAssignment("PD-1", "HVA-1", self.batteryStore)
+	PDS.setAssignment("PD-2", "HVA-1", self.batteryStore)
+
+	PDS.clearAssignment("PD-1", self.batteryStore)
+	lu.assertEquals(hva.PointDefenseProviderIds, { "PD-2" })
+	lu.assertEquals(hva.PointDefenseProviderId, "PD-2")
+	lu.assertTrue(pd2.IsPointDefense)
+
+	PDS.clearAssignment("PD-2", self.batteryStore)
+	lu.assertNil(hva.PointDefenseProviderId)
+	lu.assertEquals(#hva.PointDefenseProviderIds, 0)
+end
+
+function TestSeveralProviders:test_reassigning_a_provider_unlinks_its_old_target()
+	local pd = makeBattery({ BatteryId = "PD-1", Role = BR.SR_SAM })
+	local a = makeBattery({ BatteryId = "HVA-A", Role = BR.LR_SAM })
+	local b = makeBattery({ BatteryId = "HVA-B", Role = BR.MR_SAM })
+	self.batteryStore:add(pd)
+	self.batteryStore:add(a)
+	self.batteryStore:add(b)
+	PDS.setAssignment("PD-1", "HVA-A", self.batteryStore)
+
+	lu.assertTrue(PDS.setAssignment("PD-1", "HVA-B", self.batteryStore))
+	lu.assertNil(a.PointDefenseProviderId)
+	lu.assertEquals(b.PointDefenseProviderId, "PD-1")
+	lu.assertEquals(pd.PointDefenseTargetId, "HVA-B")
+end
+
+function TestSeveralProviders:test_providers_of_reads_a_lone_provider_id()
+	local pd = makeBattery({ BatteryId = "PD-1", Role = BR.SR_SAM })
+	local hva = makeBattery({ BatteryId = "HVA-1", Role = BR.LR_SAM, PointDefenseProviderId = "PD-1" })
+	self.batteryStore:add(pd)
+	self.batteryStore:add(hva)
+
+	local out = PDS.providersOf(hva, self.batteryStore, {})
+	lu.assertEquals(#out, 1)
+	lu.assertIs(out[1], pd)
+end
+
+function TestSeveralProviders:test_both_providers_engage_two_harms()
+	local trackStore = Medusa.Services.TrackStore:new()
+	local geoGrid = GeoGrid(10000, { "Battery", "Track" })
+	local lr = makeBattery({ BatteryId = "LR-1", Role = BR.LR_SAM, Position = { x = 0, y = 0, z = 0 } })
+	local pd1 = makeBattery({
+		BatteryId = "PD-1",
+		Role = BR.SR_SAM,
+		Position = { x = 1000, y = 0, z = 0 },
+		EngagementRangeMax = 20000,
+		TotalAmmoStatus = 8,
+		ActivationState = AS.STATE_WARM,
+	})
+	local pd2 = makeBattery({
+		BatteryId = "PD-2",
+		Role = BR.SR_SAM,
+		Position = { x = -1000, y = 0, z = 0 },
+		EngagementRangeMax = 20000,
+		TotalAmmoStatus = 8,
+		ActivationState = AS.STATE_WARM,
+	})
+	for _, b in ipairs({ lr, pd1, pd2 }) do
+		self.batteryStore:add(b)
+		geoGrid:add("Battery", b.BatteryId, b.Position)
+	end
+	PDS.setAssignment("PD-1", "LR-1", self.batteryStore)
+	PDS.setAssignment("PD-2", "LR-1", self.batteryStore)
+	for i, x in ipairs({ 5000, -5000 }) do
+		local harm = makeTrack({
+			TrackId = "HARM-" .. i,
+			AssessedAircraftType = "HARM",
+			Position = { x = x, y = 3000, z = 0 },
+			Velocity = { x = -x / 20, y = -50, z = 0 },
+		})
+		trackStore:add(harm)
+		geoGrid:add("Track", harm.TrackId, harm.Position)
+	end
+
+	local count =
+		PDS.engageThreats(makeCtx({ trackStore = trackStore, batteryStore = self.batteryStore, geoGrid = geoGrid }))
+	lu.assertEquals(count, 2)
+	lu.assertEquals(pd1.CurrentTargetTrackId, "HARM-1")
+	lu.assertEquals(pd2.CurrentTargetTrackId, "HARM-2")
+end
+
+function TestSeveralProviders:test_harm_activates_every_provider()
+	local geoGrid = GeoGrid(10000, { "Battery", "Track" })
+	local lr = makeBattery({ BatteryId = "LR-1", Role = BR.LR_SAM, Position = { x = 0, y = 0, z = 0 } })
+	local pd1 = makeBattery({
+		BatteryId = "PD-1",
+		Role = BR.SR_SAM,
+		Position = { x = 0, y = 0, z = 1000 },
+		EngagementRangeMax = 12000,
+		TotalAmmoStatus = 8,
+		ActivationState = AS.STATE_WARM,
+	})
+	local pd2 = makeRadarDirectedAaa({
+		BatteryId = "PD-2",
+		Position = { x = 0, y = 0, z = -1000 },
+		EngagementRangeMax = 4000,
+		TotalAmmoStatus = 8,
+		ActivationState = AS.STATE_WARM,
+	})
+	for _, b in ipairs({ lr, pd1, pd2 }) do
+		self.batteryStore:add(b)
+		geoGrid:add("Battery", b.BatteryId, b.Position)
+	end
+	PDS.setAssignment("PD-1", "LR-1", self.batteryStore)
+	PDS.setAssignment("PD-2", "LR-1", self.batteryStore)
+	local harm = makeTrack({
+		TrackId = "HARM-1",
+		AssessedAircraftType = "HARM",
+		-- Beyond the 15 km search radius of the opportunistic pass: only the assignment can wake the providers.
+		Position = { x = 20000, y = 0, z = 0 },
+		Velocity = { x = -300, y = 0, z = 0 },
+	})
+
+	local count = PDS.activateForHarm(harm, geoGrid, self.batteryStore, 1000, { DefendPk = 0 })
+	lu.assertEquals(count, 2)
+	lu.assertEquals(pd1.ActivationState, AS.STATE_HOT)
+	lu.assertEquals(pd2.ActivationState, AS.STATE_HOT)
+end
+
+-- == [BKE] Point defense tied to a battery by the mission maker ==
+
+TestPointDefenseTies = {}
+
+function TestPointDefenseTies:setUp()
+	setupMocks()
+	self.batteryStore = Medusa.Services.BatteryStore:new()
+	self.geoGrid = GeoGrid(10000, { "Battery", "Track" })
+end
+
+function TestPointDefenseTies:add(id, name, role, x, extra)
+	local data = { BatteryId = id, GroupName = name, Role = role, Position = { x = x, y = 0, z = 0 } }
+	for k, v in pairs(extra or {}) do
+		data[k] = v
+	end
+	local b = makeBattery(data)
+	self.batteryStore:add(b)
+	self.geoGrid:add("Battery", b.BatteryId, b.Position)
+	return b
+end
+
+function TestPointDefenseTies:assign(ties)
+	return PDS.autoAssignShorad(
+		makeCtx({ batteryStore = self.batteryStore, geoGrid = self.geoGrid, pointDefenseTies = ties })
+	)
+end
+
+function TestPointDefenseTies:test_tie_wins_over_nearest()
+	local pd = self:add("PD-1", "iads.pd tor", BR.SR_SAM, 0)
+	local near = self:add("SA2", "iads.sa2", BR.MR_SAM, 1000)
+	local tied = self:add("SA10", "iads.sa10", BR.LR_SAM, 8000)
+
+	self:assign({ ["iads.pd tor"] = "iads.sa10" })
+	lu.assertEquals(pd.PointDefenseTargetId, "SA10")
+	lu.assertEquals(tied.PointDefenseProviderId, "PD-1")
+	lu.assertNil(near.PointDefenseProviderId)
+end
+
+function TestPointDefenseTies:test_tie_replaces_an_automatic_assignment()
+	local pd = self:add("PD-1", "pd", BR.SR_SAM, 0)
+	local near = self:add("SA2", "sa2", BR.MR_SAM, 1000)
+	local tied = self:add("SA10", "sa10", BR.LR_SAM, 8000, { OperationalStatus = BOS.INOPERATIVE })
+
+	-- The tied battery is not up yet: the PD defends the nearest battery meanwhile.
+	self:assign({ pd = "sa10" })
+	lu.assertEquals(pd.PointDefenseTargetId, "SA2")
+
+	tied.OperationalStatus = BOS.ACTIVE
+	self:assign({ pd = "sa10" })
+	lu.assertEquals(pd.PointDefenseTargetId, "SA10")
+	lu.assertNil(near.PointDefenseProviderId)
+	lu.assertEquals(tied.PointDefenseProviderId, "PD-1")
+end
+
+function TestPointDefenseTies:test_two_tied_providers_and_automatic_goes_elsewhere()
+	local pd1 = self:add("PD-1", "pd1", BR.SR_SAM, 0, { Position = { x = 0, y = 0, z = 500 } })
+	local pd2 = self:add("PD-2", "pd2", BR.SR_SAM, 0, { Position = { x = 0, y = 0, z = -500 } })
+	local free = self:add("PD-3", "pd3", BR.SR_SAM, 200)
+	local sa10 = self:add("SA10", "sa10", BR.LR_SAM, 0)
+	local sa11 = self:add("SA11", "sa11", BR.MR_SAM, 6000)
+
+	self:assign({ pd1 = "sa10", pd2 = "sa10" })
+	lu.assertItemsEquals(sa10.PointDefenseProviderIds, { "PD-1", "PD-2" })
+	lu.assertEquals(free.PointDefenseTargetId, "SA11")
+	lu.assertEquals(sa11.PointDefenseProviderId, "PD-3")
+	lu.assertTrue(pd1.IsPointDefense and pd2.IsPointDefense)
+end
+
+function TestPointDefenseTies:test_bad_ties_fall_back_to_nearest()
+	local pd = self:add("PD-1", "pd", BR.SR_SAM, 0)
+	local near = self:add("SA2", "sa2", BR.MR_SAM, 1000)
+	self:add("FAR", "far", BR.LR_SAM, 40000)
+	self:add("GUNS", "guns", BR.AAA, 2000)
+
+	for _, target in ipairs({ "no such group", "far", "guns" }) do
+		PDS.clearAssignment("PD-1", self.batteryStore)
+		self:assign({ pd = target })
+		lu.assertEquals(pd.PointDefenseTargetId, "SA2", target)
+	end
+	lu.assertEquals(near.PointDefenseProviderId, "PD-1")
+end
+
+function TestPointDefenseTies:test_tie_from_a_battery_that_cannot_be_point_defence_is_ignored()
+	local lr = self:add("LR-2", "lr2", BR.LR_SAM, 0)
+	local sa10 = self:add("SA10", "sa10", BR.LR_SAM, 1000)
+
+	self:assign({ lr2 = "sa10" })
+	lu.assertFalse(lr.IsPointDefense)
+	lu.assertNil(sa10.PointDefenseProviderId)
+end
+
+function TestSeveralProviders:test_removed_provider_is_pruned_and_replaced()
+	local geoGrid = GeoGrid(10000, { "Battery", "Track" })
+	local hva = makeBattery({ BatteryId = "HVA-1", Role = BR.LR_SAM, Position = { x = 0, y = 0, z = 0 } })
+	local dead = makeBattery({ BatteryId = "PD-1", Role = BR.SR_SAM, Position = { x = 500, y = 0, z = 0 } })
+	local spare = makeBattery({ BatteryId = "PD-2", Role = BR.SR_SAM, Position = { x = 900, y = 0, z = 0 } })
+	for _, b in ipairs({ hva, dead }) do
+		self.batteryStore:add(b)
+		geoGrid:add("Battery", b.BatteryId, b.Position)
+	end
+	PDS.setAssignment("PD-1", "HVA-1", self.batteryStore)
+	-- The provider is destroyed: the network removes it from the store without unlinking it.
+	self.batteryStore:remove("PD-1")
+	self.batteryStore:add(spare)
+	geoGrid:add("Battery", spare.BatteryId, spare.Position)
+
+	local ctx = makeCtx({ batteryStore = self.batteryStore, geoGrid = geoGrid })
+	lu.assertEquals(PDS.releaseOrphanedDefenders(ctx), 1)
+	lu.assertNil(hva.PointDefenseProviderId)
+	PDS.autoAssignShorad(ctx)
+	lu.assertEquals(hva.PointDefenseProviderId, "PD-2")
+end
+
+function TestPointDefenseTies:test_tie_applies_to_an_engagement_impaired_battery()
+	local pd = self:add("PD-1", "pd", BR.SR_SAM, 0)
+	local tied = self:add("SA10", "sa10", BR.LR_SAM, 3000, { OperationalStatus = BOS.ENGAGEMENT_IMPAIRED })
+
+	self:assign({ pd = "sa10" })
+	lu.assertEquals(pd.PointDefenseTargetId, "SA10")
+	lu.assertEquals(tied.PointDefenseProviderId, "PD-1")
 end

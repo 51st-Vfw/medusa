@@ -20,8 +20,9 @@ require("core.Logger")
     - Creates new tracks from sensor reports and updates existing tracks with fresh position and velocity.
     - Manages track lifecycle: marks tracks as stale after a timeout and expires them after the memory window.
     - Re-acquires lost tracks: with doctrine EvidenceReacquisition (default) a new contact continues a recently
-      dropped track when it is where that track should be and flies as it should (TrackReacquisition), whatever DCS
-      object it is; off, a dropped track comes back only for the same DCS object near its old position.
+      dropped track, or a held confirmed ARM that has missed two of its looks (TrackReacquisition.isSilent,
+      mayBeTakenWhileHeld), when it is where that track should be and flies as it should (TrackReacquisition),
+      whatever DCS object it is; off, a dropped track comes back only for the same DCS object near its old position.
 
     How others use it
     - SensorPollingService feeds track reports into processReport; IadsNetwork calls expireTracks each tick.
@@ -61,6 +62,24 @@ end
 --- Doctrine EvidenceReacquisition: true = re-acquire lost tracks by evidence, false = by DCS object id (stock).
 function Medusa.Services.TrackManager:setEvidenceReacquisition(on)
 	self._evidenceReacquisition = on ~= false
+end
+
+--- The network's sensor polling: `source:coveredUntil(networkId)` says until when the slowest radar still covering a
+--- contact may yet look at it (SensorPollingService.coveredUntil). Without one, a held track's own looks decide.
+function Medusa.Services.TrackManager:setCoverSource(source)
+	self._coverSource = source
+end
+
+--- May a radar still covering this track's object yet look at it? Looks come at the fastest covering radar's rate
+--- (polls are throttled per object network-wide), so a slower radar's look may still be due when the faster one has
+--- shut down. No allocation.
+function Medusa.Services.TrackManager:_mayStillBeSeen(track, now)
+	local source, id = self._coverSource, track.NetworkId
+	if not (source and id) then
+		return false
+	end
+	local untilTime = source:coveredUntil(id)
+	return untilTime ~= nil and now <= untilTime
 end
 
 function Medusa.Services.TrackManager:_releaseDisplayIds(track)
@@ -171,7 +190,13 @@ function Medusa.Services.TrackManager:_launchCue(p, v, now)
 	for id in pairs(ids) do
 		local other = self._store:get(id)
 		local op, ov = other and other.Position, other and other.Velocity
-		if op and ov and now - (other.FirstDetectionTime or now) >= TM.LAUNCH_CUE_MIN_PARENT_AGE_SEC then
+		-- A track silent for two of its looks is not where it was last seen: nothing is seen leaving it.
+		if
+			op
+			and ov
+			and not other.HeldLost
+			and now - (other.FirstDetectionTime or now) >= TM.LAUNCH_CUE_MIN_PARENT_AGE_SEC
+		then
 			local rx, ry, rz = p.x - op.x, p.y - op.y, p.z - op.z
 			local dist = math.sqrt(rx * rx + ry * ry + rz * rz)
 			local ospeed = math.sqrt(ov.x * ov.x + ov.y * ov.y + ov.z * ov.z)
@@ -426,13 +451,43 @@ function Medusa.Services.TrackManager:_removeLost(e)
 	self._lostGrid:remove(e.TrackId)
 end
 
+--- A held track listed as lost (TrackReacquisition.isSilent) leaves the list: seen again, or about to be listed
+--- afresh at expiry.
+function Medusa.Services.TrackManager:_unlistHeld(track)
+	track.HeldLost = nil
+	local e = self._lost[track.TrackId]
+	if e and e.Held then
+		self:_removeLost(e)
+	end
+end
+
+--- A new contact continues (or a tie uses up) a held track: the held track leaves the picture as an expired one
+--- does (store, grid, its DCS object's mapping, TrackRemoved), its display ids left to the caller. Returns a
+--- snapshot of it as it is now, or `e` when it is already gone.
+function Medusa.Services.TrackManager:_retireHeld(e, now)
+	local track = self._store:get(e.TrackId)
+	if not track then
+		return e
+	end
+	track.HeldLost = nil
+	local fresh = Medusa.Services.TrackReacquisition.snapshot(track, now)
+	self._store:remove(track.TrackId)
+	if self._geoGrid then
+		self._geoGrid:remove(track.TrackId)
+	end
+	self:_remapNetworkIdMappings(track.TrackId, nil)
+	self._eventBus:publish({ id = "TrackRemoved", TrackId = track.TrackId, timestamp = now })
+	return fresh
+end
+
 --- Forget lost tracks older than TRACK_REASSOC_TTL_SEC and refresh the query's bounds (fastest speed, oldest look).
 --- Run once a second (pruneStale); _scoreLost skips an entry past its time in between.
 function Medusa.Services.TrackManager:_evictLost(now)
 	self._lostSweptAt = now
 	local maxSpeed, oldest = 0, nil
 	for id, e in pairs(self._lost) do
-		if now - e.expiredAt > Medusa.Constants.TRACK_REASSOC_TTL_SEC then
+		-- A held entry leaves the list with its track (seen again, continued, or expired), never by age.
+		if not e.Held and now - e.expiredAt > Medusa.Constants.TRACK_REASSOC_TTL_SEC then
 			self:_releaseDisplayIds(e)
 			self._lost[id] = nil
 			self._lostGrid:remove(id)
@@ -467,10 +522,15 @@ function Medusa.Services.TrackManager:_scoreLost(report, now, cue)
 	for id in pairs(ids or {}) do
 		local e = self._lost[id]
 		local within = false
-		if e and now - e.expiredAt <= ttl then
+		if e and (e.Held or now - e.expiredAt <= ttl) then
 			local gate = Svc.gateRadius(e.Speed, now - e.Time)
 			local dx, dz = p.x - e.Position.x, p.z - e.Position.z
 			within = dx * dx + dz * dz <= gate * gate
+		end
+		if within and e.Held then
+			-- A radar that has detected the held ARM since it was lost may yet look at it: it is not lost now.
+			local held = self._store:get(id)
+			within = not (held and self:_mayStillBeSeen(held, now))
 		end
 		if within and Svc.mayInherit(e, v, cue, now) then
 			local s = Svc.score(e, p, v, now)
@@ -513,6 +573,9 @@ end
 
 function Medusa.Services.TrackManager:_reacquireTrack(report, e, score, now, cue)
 	self:_removeLost(e)
+	if e.Held then
+		e = self:_retireHeld(e, now)
+	end
 	local track = Medusa.Entities.Track.new({
 		NetworkId = report.NetworkId,
 		DisplayTrackId = e.DisplayTrackId,
@@ -581,6 +644,9 @@ function Medusa.Services.TrackManager:_resolveTie(track, report, best, score, ti
 	end
 	local carried = Svc.carryTie(track, cands, tied, class, now, mixedNear)
 	self:_removeLost(best)
+	if best.Held then
+		self:_retireHeld(best, now)
+	end
 	self:_releaseDisplayIds(best)
 	self._logger:info(
 		string.format(
@@ -603,6 +669,10 @@ function Medusa.Services.TrackManager:_updateExistingTrack(trackId, report, now)
 		return self:_createNewTrack(report, now, self:_launchCue(report.Position, report.Velocity, now))
 	end
 
+	-- Seen again: no longer lost to new contacts.
+	if track.HeldLost then
+		self:_unlistHeld(track)
+	end
 	-- Order matters: update must precede smoothing, smoothing must precede maneuver derivation.
 	-- SmoothedVelocity feeds Pk aspect calculation; ManeuverState feeds aircraft type classification.
 	Medusa.Entities.Track.update(track, report.Position, report.Velocity, now)
@@ -679,6 +749,8 @@ function Medusa.Services.TrackManager:pruneStale(now)
 		expiredIds[i] = nil
 	end
 	local LS = Medusa.Constants.TrackLifecycleState
+	local Reacq = Medusa.Services.TrackReacquisition
+	local evidence = self._evidenceReacquisition
 
 	for i = 1, #tracks do
 		local track = tracks[i]
@@ -688,6 +760,19 @@ function Medusa.Services.TrackManager:pruneStale(now)
 			elseif track.LifecycleState == LS.STALE then
 				expiredIds[#expiredIds + 1] = track.TrackId
 			end
+		elseif
+			evidence
+			and not track.HeldLost
+			and Reacq.mayBeTakenWhileHeld(track)
+			and Reacq.isSilent(track, now)
+			and not self:_mayStillBeSeen(track, now)
+		then
+			-- A confirmed ARM still held, silent for two of its looks and two of the slowest covering radar's: a new
+			-- contact may continue it (and take its label) while no radar covers it again and the label crosses the gap.
+			local e = Reacq.snapshot(track, now)
+			e.Held = true
+			track.HeldLost = true
+			self:_addLost(e)
 		end
 	end
 
@@ -708,6 +793,9 @@ function Medusa.Services.TrackManager:pruneStale(now)
 			Medusa.Services.MetricsService.inc("medusa_tracks_expired_total")
 			-- Save classification state for re-association
 			if self._evidenceReacquisition then
+				if track.HeldLost then
+					self:_unlistHeld(track)
+				end
 				self:_addLost(Medusa.Services.TrackReacquisition.snapshot(track, now))
 			elseif track.NetworkId then
 				self._dormant[track.NetworkId] = {
@@ -776,6 +864,9 @@ function Medusa.Services.TrackManager:mergeTracks(survivingTrackId, absorbedTrac
 	Medusa.Entities.Track.addDisplayIdAlias(survivor, absorbed.DisplayTrackId)
 	for i = 1, #absorbed.DisplayTrackIdAliases do
 		Medusa.Entities.Track.addDisplayIdAlias(survivor, absorbed.DisplayTrackIdAliases[i])
+	end
+	if absorbed.HeldLost then
+		self:_unlistHeld(absorbed)
 	end
 	self:_remapNetworkIdMappings(absorbedTrackId, survivingTrackId)
 	self._store:remove(absorbedTrackId)

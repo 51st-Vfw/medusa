@@ -6,7 +6,7 @@ require("core.Chance")
 
 -- The sensing, identification and report chain draws its luck through Medusa.Chance. Outside training a draw makes
 -- the same random() calls, in the same order, as the plain expression it stands for; in training (doctrine
--- TrainingMode) it is deterministic and never lets luck favour the attacker.
+-- TrainingMode) it is deterministic and never lets luck favor the attacker.
 
 local Chance = Medusa.Chance
 

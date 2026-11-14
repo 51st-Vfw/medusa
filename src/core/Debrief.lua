@@ -24,8 +24,8 @@ require("core.Logger")
       when an event names none.
     - Events: FIRST_DETECTION (a non-friendly track first made), IDENTIFIED (first called BANDIT or HOSTILE),
       REPORT_NOT_MADE, REPORT_LOST, REPORT_DELIVERED, READINESS, WAKE, ARM_CONFIRMED, DECOY_PROBABLE, DECOY_FIRE_HOLD, SITE_LOST,
-      LOCAL_RADAR_UP, TRAINING_MODE, CREW_ROSTER, ESM_INTERCEPT, ESM_FIX, ESM_AMBIGUOUS (listening stations),
-      ARM_BLOCKED (an ARM-like track not confirmed, once per track and why: unpowered, window or size).
+      LOCAL_RADAR_UP, TRAINING_MODE, CREW_ROSTER,
+      ARM_BLOCKED (an ARM-like track not confirmed, once per track and why: unpowered, window, size or ballistic).
 --]]
 
 Medusa.Debrief = { _network = nil }

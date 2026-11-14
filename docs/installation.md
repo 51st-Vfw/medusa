@@ -13,8 +13,8 @@ Get the latest release from the fork's [GitHub Releases](https://github.com/51st
 |---|---|
 | `medusa-bke.lua` | The standard build: Medusa BKE with its runtime library (dcs-harness) bundled. Use this one unless you know you need the thin build |
 | `medusa-bke-thin.lua` | The thin build: Medusa BKE without dcs-harness, for missions that already load dcs-harness |
-| `medusa-bke.zip` | `medusa-bke.lua` in a zip, named with its version inside (`medusa-bke-0.0.1.lua`) |
-| `medusa-bke-thin.zip` | `medusa-bke-thin.lua` in a zip, named with its version inside (`medusa-bke-thin-0.0.1.lua`) |
+| `medusa-bke.zip` | `medusa-bke.lua` in a zip, named with its version inside (`medusa-bke-0.1.0.lua`) |
+| `medusa-bke-thin.zip` | `medusa-bke-thin.lua` in a zip, named with its version inside (`medusa-bke-thin-0.1.0.lua`) |
 | `SHA256SUMS.txt` | SHA-256 checksums of the four files above |
 | `LICENSE` | The license file, the same as Medusa's |
 
@@ -54,11 +54,10 @@ before `medusa-bke-thin.lua`. Use `medusa-bke.lua` instead, or fix the load orde
 Start the mission and open `dcs.log` (in `Saved Games\DCS\Logs`). Medusa writes its lines with the `Medusa` tag. At
 start you should see:
 
-- a line naming the edition and version: `Medusa IADS - Black Knight Edition (BKE) v0.0.1 (based on Medusa v1.6.0)`;
+- a line naming the edition and version: `Medusa IADS - Black Knight Edition (BKE) v0.1.0 (based on Medusa v1.6.0)`;
 - for each network, its configuration and a summary of its doctrine;
-- **[BKE]** one `crew roster` line per network (its observer posts and crews by skill), a `listening stations:` line
-  when the network has [listening stations](esm-listening-stations.md), and a `local radar ...` line for each
-  [local cueing radar](local-radars-and-observers.md) found;
+- **[BKE]** one `crew roster` line per network (its observer posts and crews by skill), and a `local radar ...` line
+  for each [local cueing radar](local-radars-and-observers.md) found;
 - **[BKE]** with `TrainingMode = true`, a `DEBRIEF|...|ev=TRAINING_MODE|on=true` line.
 
 An `ERROR` line from `Doctrine` or `Config` means a value in your configuration was not valid. Medusa logs what it
@@ -70,7 +69,7 @@ DO SCRIPT FILE action points at `medusa-bke.lua`.
 ## Next steps
 
 - [Quick start](quick-start.md): name your groups and set a first doctrine.
-- [Naming conventions](naming-conventions.md): group names, role tokens and BKE's observer and listening-station
+- [Naming conventions](naming-conventions.md): group names, role tokens and BKE's observer
   tokens.
 - [Differences from Medusa 1.6.0](differences-from-medusa-1.6.0.md): what changes when an existing Medusa mission
   loads BKE.

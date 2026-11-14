@@ -12,8 +12,9 @@ require("core.Constants")
 
     What this entity does
     - Defines a doctrine configuration table with defaults for every tactical setting.
-    - Validates enum and boolean fields (a wrong value is an error and takes the default), clamps numeric fields,
-      fills missing values from defaults.
+    - Validates enum, boolean and number fields (a wrong value is an error and takes the default), clamps numeric
+      fields, fills missing values from defaults, and reports each top-level key it does not know (a misspelled field
+      would otherwise silently take its default).
 
     How others use it
     - Config:getDoctrine merges mission-maker overrides with this template to produce the active doctrine.
@@ -35,6 +36,14 @@ local DOCTRINE_SCHEMA = {
 	{ name = "Posture", type = "enum", default = "HOT_WAR", enum = "Posture" },
 	-- Starting readiness (SURPRISED / ALERTED / ENGAGED); rises during the mission. Unset: from Posture.
 	{ name = "Readiness", type = "enum", enum = "Readiness" },
+	-- Report skill (crew factors) of a crew whose skill the mission file does not give (spawned during the mission,
+	-- or set to Random or Player). Unset: CrewSuppression.DefaultCrewSkill, which sets their suppression resistance.
+	{
+		name = "CrewFactorsDefaultSkill",
+		type = "enum",
+		enum = "CrewSkill",
+		defaultText = "CrewSuppression.DefaultCrewSkill",
+	},
 	{ name = "ShootScoot", type = "enum", default = "NONE", enum = "ShootAndScootPolicy" },
 	{ name = "SAMAsEWR", type = "enum", default = "WHEN_NO_EWR", enum = "SAMAsEWRPolicy" },
 	{
@@ -120,10 +129,7 @@ local DOCTRINE_SCHEMA = {
 	-- Crew skill, readiness and net load shape observer reports (made at all, delay, precision, delivery) and how
 	-- often a surprised network's crews look. Off = reports and looks ignore skill, readiness and load.
 	{ name = "CrewFactors", type = "boolean", default = true },
-	-- Listening stations (groups named esm/elint) take bearings on hostile aircraft radars that transmit and
-	-- cross them into fixes when the bearings can be matched up. Off = the stations are ordinary ground crews.
-	{ name = "PassiveDetection", type = "boolean", default = true },
-	-- Training: the sensing, identification and report chain is deterministic and luck never favours the attacker
+	-- Training: the sensing, identification and report chain is deterministic and luck never favors the attacker
 	-- (ranges at their midpoint or a fixed per-object point, no return-size noise, report position errors at their
 	-- typical size in a fixed direction, no report unmade or lost). DCS's own randomness stays.
 	{ name = "TrainingMode", type = "boolean", default = false },
@@ -158,17 +164,6 @@ local MANPAD_SCHEMA = {
 		min = Medusa.Constants.Manpad.AUDIO_RANGE_MIN_M,
 		max = Medusa.Constants.Manpad.AUDIO_RANGE_MAX_M,
 	},
-}
-
--- Listening stations (doctrine ESM): antenna mast height, how far a radar's main beam, its sidelobes and an
--- early-warning radar can be heard, the 1-sigma bearing error and how often the stations listen.
-local ESM_SCHEMA = {
-	{ name = "MastHeightM", default = Medusa.Constants.Esm.DEFAULT_MAST_HEIGHT_M, min = 1, max = 60 },
-	{ name = "MaxRangeKm", default = Medusa.Constants.Esm.DEFAULT_MAX_RANGE_KM, min = 10, max = 600 },
-	{ name = "SidelobeRangeKm", default = Medusa.Constants.Esm.DEFAULT_SIDELOBE_RANGE_KM, min = 1, max = 100 },
-	{ name = "AewMaxRangeKm", default = Medusa.Constants.Esm.DEFAULT_AEW_MAX_RANGE_KM, min = 10, max = 600 },
-	{ name = "BearingSigmaDeg", default = Medusa.Constants.Esm.DEFAULT_BEARING_SIGMA_DEG, min = 0.1, max = 15 },
-	{ name = "LookIntervalSec", default = Medusa.Constants.Esm.DEFAULT_LOOK_INTERVAL_SEC, min = 2, max = 120 },
 }
 
 local AAA_SCHEMA = {
@@ -258,6 +253,29 @@ local CREW_SUPPRESSION_SCHEMA = {
 
 local _logger
 
+-- Top-level keys a doctrine table may carry: every DOCTRINE_SCHEMA field, the sub-tables resolved below, the flat
+-- MANPAD fields older missions use, and DoctrineId. Built once at load; KNOWN_BY_LOWER maps a lower-case spelling
+-- to the field so a key that differs only in case can name it.
+local KNOWN_TOP_LEVEL = { DoctrineId = true, MANPAD = true, AAA = true, CrewSuppression = true }
+for i = 1, #DOCTRINE_SCHEMA do
+	KNOWN_TOP_LEVEL[DOCTRINE_SCHEMA[i].name] = true
+end
+for i = 1, #MANPAD_SCHEMA do
+	if MANPAD_SCHEMA[i].legacyName then
+		KNOWN_TOP_LEVEL[MANPAD_SCHEMA[i].legacyName] = true
+	end
+end
+local KNOWN_BY_LOWER = {}
+for key in pairs(KNOWN_TOP_LEVEL) do
+	KNOWN_BY_LOWER[string.lower(key)] = key
+end
+-- Fields of removed features: accepted (an older mission still loads without an unknown-field error), ignored, and
+-- named once per doctrine in one notice. Not offered as the field a misspelled key resembles.
+local REMOVED_FIELDS = { "PassiveDetection", "ESM" }
+for i = 1, #REMOVED_FIELDS do
+	KNOWN_TOP_LEVEL[REMOVED_FIELDS[i]] = true
+end
+
 --- Per-kind track refresh rates for a doctrine, fixed at load. An explicit ScanUpdateRateSec entry wins, then an
 --- explicitly set PerTrackScanUpdateRate, then the default; each is clamped to the global limits and to half of
 --- TrackMemorySec (1 s floor). Logs an error for each rate it caps and when SensorCleanupSec is below the slowest
@@ -312,8 +330,8 @@ function Medusa.Entities.Doctrine.resolveScanRates(doctrine)
 	return rates
 end
 
---- Logs an error for each key in a settings table that Medusa does not know (a misspelt key is otherwise ignored).
---- @param label string Setting name used in the message, e.g. "ESM"
+--- Logs an error for each key in a settings table that Medusa does not know (a misspelled key is otherwise ignored).
+--- @param label string Setting name used in the message, e.g. "ScanUpdateRateSec"
 --- @param overrides any The mission's table; anything that is not a table is skipped
 --- @param isKnown fun(key: any): boolean
 local function reportUnknownKeys(label, overrides, isKnown)
@@ -327,15 +345,42 @@ local function reportUnknownKeys(label, overrides, isKnown)
 	end
 end
 
-local function schemaHas(schema)
-	return function(key)
-		for i = 1, #schema do
-			if schema[i].name == key then
-				return true
-			end
+--- Logs an error for each top-level doctrine key Medusa does not know; a misspelled field would otherwise silently
+--- take its default.
+local function reportUnknownTopLevelKeys(overrides)
+	for key in pairs(overrides) do
+		if not KNOWN_TOP_LEVEL[key] then
+			local resembles = type(key) == "string" and KNOWN_BY_LOWER[string.lower(key)]
+			_logger:error(
+				string.format(
+					"unknown doctrine setting '%s' ignored%s",
+					tostring(key),
+					resembles and string.format(" (did you mean '%s'?)", resembles) or ""
+				)
+			)
 		end
-		return false
 	end
+end
+
+--- A doctrine number as a usable value: a number or numeric string, not NaN. Anything else is logged as an error
+--- and gives nil (the field then takes its default, or stays unset if it has none).
+local function readNumber(s, raw)
+	if raw == nil then
+		return nil
+	end
+	local v = tonumber(raw)
+	if v == nil or v ~= v then
+		_logger:error(
+			string.format(
+				"invalid '%s' value '%s' (not a number), %s",
+				s.name,
+				tostring(raw),
+				s.default ~= nil and string.format("using '%s'", tostring(s.default)) or "ignored"
+			)
+		)
+		return nil
+	end
+	return v
 end
 
 local function resolveNumericSubtable(schema, overrides, legacyOverrides)
@@ -371,6 +416,7 @@ function Medusa.Entities.Doctrine.new(overrides)
 		_logger = Medusa.Logger:ns("Doctrine")
 	end
 	local explicit = {}
+	reportUnknownTopLevelKeys(d)
 
 	for i = 1, #DOCTRINE_SCHEMA do
 		local s = DOCTRINE_SCHEMA[i]
@@ -394,14 +440,14 @@ function Medusa.Entities.Doctrine.new(overrides)
 						s.name,
 						tostring(raw),
 						table.concat(valid, ", "),
-						s.default and tostring(s.default) or "the default"
+						s.defaultText or (s.default and tostring(s.default)) or "the default"
 					)
 				)
 				raw = nil
 			end
 			doctrine[s.name] = raw or s.default
 		elseif s.type == "number" then
-			local v = tonumber(raw) or s.default
+			local v = readNumber(s, raw) or s.default
 			if v and s.min and v < s.min then
 				v = s.min
 			end
@@ -411,7 +457,7 @@ function Medusa.Entities.Doctrine.new(overrides)
 			doctrine[s.name] = v
 		elseif s.type == "number_opt" then
 			if raw ~= nil then
-				local v = tonumber(raw)
+				local v = readNumber(s, raw)
 				if v then
 					if s.min and v < s.min then
 						v = s.min
@@ -463,8 +509,21 @@ function Medusa.Entities.Doctrine.new(overrides)
 
 	doctrine.MANPAD = resolveNumericSubtable(MANPAD_SCHEMA, d.MANPAD, d)
 	doctrine.AAA = resolveNumericSubtable(AAA_SCHEMA, d.AAA)
-	doctrine.ESM = resolveNumericSubtable(ESM_SCHEMA, d.ESM)
-	reportUnknownKeys("ESM", d.ESM, schemaHas(ESM_SCHEMA))
+	local removed = {}
+	for i = 1, #REMOVED_FIELDS do
+		if d[REMOVED_FIELDS[i]] ~= nil then
+			removed[#removed + 1] = REMOVED_FIELDS[i]
+		end
+	end
+	if #removed > 0 then
+		_logger:error(
+			string.format(
+				"doctrine %s ignored: listening stations were removed (DCS gives scripts no radar state for "
+					.. "player-flown aircraft)",
+				table.concat(removed, " and ")
+			)
+		)
+	end
 	local crewSuppressionOverrides = type(d.CrewSuppression) == "table" and d.CrewSuppression or {}
 	doctrine.CrewSuppression = resolveNumericSubtable(CREW_SUPPRESSION_SCHEMA, crewSuppressionOverrides)
 	if doctrine.CrewSuppression.DurationMinSec > doctrine.CrewSuppression.DurationMaxSec then
@@ -506,6 +565,9 @@ function Medusa.Entities.Doctrine.new(overrides)
 		crewSkill = nil
 	end
 	doctrine.CrewSuppression.DefaultCrewSkill = crewSkill or defaultCrewSkill
+	if doctrine.CrewFactorsDefaultSkill == nil then
+		doctrine.CrewFactorsDefaultSkill = doctrine.CrewSuppression.DefaultCrewSkill
+	end
 
 	return doctrine
 end

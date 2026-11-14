@@ -187,6 +187,7 @@ function Medusa.Entities.Battery.new(data)
 		IsPointDefense = data.IsPointDefense or false,
 		PointDefenseTargetId = data.PointDefenseTargetId,
 		PointDefenseProviderId = data.PointDefenseProviderId,
+		PointDefenseProviderIds = data.PointDefenseProviderIds,
 		HarmCapableUnitCount = data.HarmCapableUnitCount or 0,
 		HarmDefenseState = nil,
 		HarmDefenseDefenders = 0,
@@ -273,6 +274,8 @@ function Medusa.Entities.Battery.newUnit(data)
 		Roles = data.Roles or { Medusa.Constants.BatteryUnitRole.OTHER },
 		AmmoCount = data.AmmoCount or 0,
 		AmmoTypes = data.AmmoTypes,
+		-- The unit's gun shell type and display names (nil without a gun), whether or not the battery fires them.
+		GunNames = data.GunNames,
 		OperationalStatus = data.OperationalStatus or Medusa.Constants.UnitOperationalStatus.ACTIVE,
 		RadarStatus = data.RadarStatus or Medusa.Constants.RadarStatus.NA,
 		LastKnownLife = data.LastKnownLife,

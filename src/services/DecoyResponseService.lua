@@ -206,7 +206,7 @@ do
 	end
 
 	--- A contact the battery holds its fire against: an active probable decoy whose glide is not predicted to end at
-	--- the battery (that one it defends itself against, as point defence would).
+	--- the battery (that one it defends itself against, as point defense would).
 	local function holdWorthy(b, t)
 		if not t or not t.Position or t.LifecycleState ~= LS.ACTIVE then
 			return false

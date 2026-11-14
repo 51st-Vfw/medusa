@@ -256,7 +256,7 @@ function TestUnpoweredRelease:test_aBombDroppedByAJet_isNeverConfirmed_atAnyLook
 		lu.assertTrue(bomb.track.Release.Unpowered, "look " .. look)
 		lu.assertTrue(bomb.track.AssessedAircraftType ~= "HARM", "look " .. look)
 		if look == 2 then
-			-- still SUSPECT/PROBABLE: alerts and point defence see it; the debrief says why it was not confirmed
+			-- still SUSPECT/PROBABLE: alerts and point defense see it; the debrief says why it was not confirmed
 			lu.assertTrue(bomb.suspected)
 			lu.assertEquals(count(lines, "|ev=ARM_BLOCKED|"), 1)
 			lu.assertEquals(count(lines, "|net=red-net|ev=ARM_BLOCKED|track=AB0002|why=unpowered|"), 1)
@@ -810,4 +810,169 @@ function TestReleaseReacquisition:test_anUnmarkedTrackReacquiredBesideAJet_isJud
 	lu.assertEquals(again.HarmAssessment.label, "CONFIRMED")
 	HDS.assessSingleTrack(again, { again }, nil, w.batteries, 1.0, 120, nil, "red-net")
 	lu.assertEquals(again.HarmAssessment.label, "CONFIRMED")
+end
+
+-- == A store seen too late to link to its aircraft: it falls like a bomb ==
+
+--- A jet at 6 km and 300 m/s flies at the SAM and drops a store whose free fall ends `short` m before it; the store is
+--- first seen `late` s after release (far below the jet: not linked). `store` (optional) changes the store: { p, v
+--- offsets from the jet at release, accel }. `rule = false` turns the ballistic rule off (control); `jetUnseen`: the
+--- network never sees the jet. Looks every `look` s; the jet turns away after the release.
+local function flyLateStore(opts)
+	setupMocks()
+	local look, late, short = opts.look or 2, opts.late or 20, opts.short or 0
+	local alt, speed = 6000, 300
+	local fall = math.sqrt(2 * alt / G)
+	local releaseT = 1030
+	local minLooks = R.BALLISTIC_MIN_LOOKS
+	if opts.rule == false then
+		R.BALLISTIC_MIN_LOOKS = math.huge
+	end
+	local w = newWorld()
+	local jet = w:add({
+		id = "jet",
+		p = { x = 0, y = alt, z = -short - speed * fall - speed * (releaseT - 1000) },
+		v = { x = 0, y = 0, z = speed },
+		sizeDb = JET_SIZE_DB,
+		born = opts.jetUnseen and math.huge or nil,
+	})
+	local lines, restore
+	local ok, err = pcall(function()
+		w:run(releaseT, look)
+		local s = opts.store or {}
+		local dp, dv = s.dp or { x = 0, y = -100, z = 0 }, s.dv or { x = 0, y = 0, z = 0 }
+		w:add({
+			id = "store",
+			p = { x = jet.p.x + dp.x, y = jet.p.y + dp.y, z = jet.p.z + dp.z },
+			v = { x = jet.v.x + dv.x, y = jet.v.y + dv.y, z = jet.v.z + dv.z },
+			accel = s.accel or gravity,
+			born = releaseT + late,
+		})
+		jet.accel = function()
+			return 3, 0, 0
+		end
+		lines, restore = captureInfo()
+		if opts.coldAfterSeen then
+			-- the SAM shuts down once the store has been seen; a second SAM stays up
+			w.batteries:add(Medusa.Entities.Battery.new({
+				NetworkId = 1,
+				GroupId = 2,
+				GroupName = "SAM-2",
+				OperationalStatus = "ACTIVE",
+				ActivationState = "STATE_HOT",
+				Position = { x = 10000, y = 0, z = 0 },
+				EngagementRangeMax = 50000,
+			}))
+			w:run(releaseT + late + opts.coldAfterSeen, look)
+			for _, b in ipairs(w.batteries:getAll({})) do
+				if b.GroupName == "SAM-1" then
+					b.ActivationState = "STATE_COLD"
+				end
+			end
+		end
+		w:run(releaseT + 90, look)
+	end)
+	if restore then
+		restore()
+	end
+	R.BALLISTIC_MIN_LOOKS = minLooks
+	if not ok then
+		error(err)
+	end
+	return w.objects[#w.objects], lines, w
+end
+
+TestBallisticFall = {}
+
+function TestBallisticFall:setUp()
+	setupMocks()
+end
+
+--- A store whose motor burns `burn` s from 1050 (seen: its first looks), then falls.
+local function motorThenFall(burn)
+	return {
+		accel = function(o, t)
+			local a = (t > 1050 and t <= 1050 + burn) and 10 or 0
+			local v = math.sqrt(o.v.x * o.v.x + o.v.y * o.v.y + o.v.z * o.v.z)
+			return o.v.x / v * a, o.v.y / v * a - G, o.v.z / v * a
+		end,
+	}
+end
+
+function TestBallisticFall:test_control_aLateBombLandingClearOfTheSam_isConfirmedWithoutTheRule()
+	local bomb = flyLateStore({ short = 6000, rule = false })
+	lu.assertNil(bomb.track.Release) -- too late to link to the jet
+	lu.assertNotNil(bomb.confirmedAt)
+end
+
+function TestBallisticFall:test_aLateBombLandingClearOfEveryRadar_isHeldAtProbable()
+	for _, short in ipairs({ 4000, 6000, 8000 }) do
+		local bomb, lines = flyLateStore({ short = short })
+		lu.assertNil(bomb.confirmedAt, short)
+		lu.assertTrue(bomb.track.AssessedAircraftType ~= "HARM", short)
+		lu.assertTrue(bomb.suspected, short)
+		lu.assertEquals(count(lines, "|ev=ARM_BLOCKED|"), 1, short)
+		lu.assertEquals(count(lines, "|why=ballistic|"), 1, short)
+		lu.assertEquals(count(lines, "it falls like a bomb and will land clear of every battery"), 1, short)
+		lu.assertEquals(count(lines, "ev=ARM_CONFIRMED"), 0, short)
+	end
+end
+
+function TestBallisticFall:test_aStoreFallingOntoTheSam_isStillConfirmedOnTime()
+	-- An ARM can coast without lift or motor after burnout: one that lands on or near its radar is still an ARM.
+	for _, short in ipairs({ 0, 2000 }) do
+		local control = flyLateStore({ short = short, rule = false })
+		local store, lines = flyLateStore({ short = short })
+		lu.assertNotNil(control.confirmedAt, short)
+		lu.assertEquals(store.confirmedAt, control.confirmedAt, short)
+		lu.assertEquals(count(lines, "|why=ballistic|"), 0, short)
+	end
+end
+
+function TestBallisticFall:test_aStoreFallingOntoASamThatShutDown_isStillConfirmedOnTime()
+	-- The SAM it falls on goes cold (a radar shuts down against an ARM): its site is still where an ARM lands.
+	for _, after in ipairs({ 2, 6 }) do
+		local control = flyLateStore({ short = 0, rule = false, coldAfterSeen = after })
+		local store, lines = flyLateStore({ short = 0, coldAfterSeen = after })
+		lu.assertNotNil(control.confirmedAt, after)
+		lu.assertEquals(store.confirmedAt, control.confirmedAt, after)
+		lu.assertEquals(count(lines, "|why=ballistic|"), 0, after)
+	end
+end
+
+function TestBallisticFall:test_aLoftedStoreWithMoreEnergyThanAnyAircraftNearIt_isConfirmedOnTime()
+	-- 300 m/s faster than the jet: 9 km more energy height than the jet ever had. No aircraft near it could have
+	-- dropped it: a motor put it there (a lofted ARM coasting to its radar).
+	local lofted = { dv = { x = 0, y = 0, z = 300 } }
+	local control = flyLateStore({ short = 6000, rule = false, store = lofted })
+	local store = flyLateStore({ short = 6000, store = lofted })
+	lu.assertNotNil(control.confirmedAt)
+	lu.assertEquals(store.confirmedAt, control.confirmedAt)
+	-- it does fall clear of the SAM: only the energy bound lets it be confirmed
+	local margin = R.BALLISTIC_CARRIER_MARGIN_M
+	R.BALLISTIC_CARRIER_MARGIN_M = 1e6
+	local ok, held = pcall(flyLateStore, { short = 6000, store = lofted })
+	R.BALLISTIC_CARRIER_MARGIN_M = margin
+	lu.assertTrue(ok, held)
+	lu.assertNil(held.confirmedAt)
+end
+
+function TestBallisticFall:test_aStoreSeenWithAMotor_isNeverBallistic()
+	for _, burn in ipairs({ 4, 8 }) do
+		local control = flyLateStore({ short = 6000, rule = false, store = motorThenFall(burn) })
+		local store, lines = flyLateStore({ short = 6000, store = motorThenFall(burn) })
+		lu.assertTrue(store.track.HarmAssessment.motorSeen, burn)
+		lu.assertNotNil(control.confirmedAt, burn)
+		lu.assertEquals(store.confirmedAt, control.confirmedAt, burn)
+		lu.assertEquals(count(lines, "|why=ballistic|"), 0, burn)
+	end
+	-- without the motor the same fall is held
+	lu.assertNil(flyLateStore({ short = 6000, store = motorThenFall(0) }).confirmedAt)
+end
+
+function TestBallisticFall:test_withNoAircraftNearIt_aFallingStoreIsJudgedOnItsFlight()
+	local control = flyLateStore({ short = 6000, rule = false, jetUnseen = true })
+	local store = flyLateStore({ short = 6000, jetUnseen = true })
+	lu.assertNotNil(control.confirmedAt)
+	lu.assertEquals(store.confirmedAt, control.confirmedAt)
 end

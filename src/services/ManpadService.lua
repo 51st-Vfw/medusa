@@ -135,7 +135,7 @@ local function scheduleWake(ctx, battery, wakeReason, minSec, maxSec)
 end
 
 --- The posture sleeping crews act under: a SURPRISED network's crews (crew factors) are not watching the sky, so
---- under HOT_WAR they wake only to a cue, a sound or a neighbour, as under WARM_WAR.
+--- under HOT_WAR they wake only to a cue, a sound or a neighbor, as under WARM_WAR.
 function Medusa.Services.ManpadService.sleepPosture(posture, surprised)
 	if surprised and posture == P.HOT_WAR then
 		return P.WARM_WAR

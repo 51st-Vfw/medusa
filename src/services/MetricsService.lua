@@ -212,6 +212,15 @@ local function observeSummary(s, value, windowSize)
 	s.count = s.count + 1
 end
 
+--- Observe a duration measured with Medusa.hpTimer. Nothing is recorded when the timer is mission model time: the
+--- reading is always 0 there and would only fake a fast tick.
+function Medusa.Services.MetricsService.observeDuration(name, seconds, labels)
+	if not Medusa.hpTimerIsWallClock then
+		return
+	end
+	return Medusa.Services.MetricsService.observe(name, seconds, labels)
+end
+
 function Medusa.Services.MetricsService.observe(name, value, labels)
 	local entry = Medusa.Services.MetricsService._registry[name]
 	if not entry then
@@ -456,7 +465,7 @@ function Medusa.Services.MetricsService.serialize()
 	end
 
 	-- Self-time: observe duration (appears in next scrape)
-	Medusa.Services.MetricsService.observe("medusa_serialize_duration_seconds", hpt() - t0)
+	Medusa.Services.MetricsService.observeDuration("medusa_serialize_duration_seconds", hpt() - t0)
 	return result
 end
 

@@ -129,12 +129,28 @@ local function findClosestThreatenedBattery(harmTrack, geoGrid, batteryStore, th
 	return best
 end
 
+local _providerBuffer = {}
+
+--- HARM-capable units of every point-defense provider of the battery ([BKE] a battery may have several).
 local function computePdDefenders(battery, batteryStore)
-	local provider = batteryStore:get(battery.PointDefenseProviderId)
-	if not provider or provider.HarmCapableUnitCount == 0 then
-		return 0
+	local providers = Medusa.Services.PointDefenseService.providersOf(battery, batteryStore, _providerBuffer)
+	local total = 0
+	for i = 1, #providers do
+		total = total + (providers[i].HarmCapableUnitCount or 0)
 	end
-	return provider.HarmCapableUnitCount
+	return total
+end
+
+--- [BKE] The first provider that can still defend the battery against HARMs, or nil.
+local function viableHarmProvider(battery, batteryStore)
+	local providers = Medusa.Services.PointDefenseService.providersOf(battery, batteryStore, _providerBuffer)
+	for i = 1, #providers do
+		local provider = providers[i]
+		if Medusa.Services.PointDefenseService.isProviderViable(provider) and provider.HarmCapableUnitCount > 0 then
+			return provider
+		end
+	end
+	return nil
 end
 
 --- Returns effective defense points for a battery, accounting for ammo saturation and pooling.
@@ -251,8 +267,8 @@ local function shutdownBattery(
 	end
 	if strategy == HRS.SHUTDOWN_UNLESS_PD or strategy == HRS.AUTO_DEFENSE then
 		if battery.PointDefenseProviderId then
-			local provider = batteryStore:get(battery.PointDefenseProviderId)
-			if Medusa.Services.PointDefenseService.isProviderViable(provider) and provider.HarmCapableUnitCount > 0 then
+			local provider = viableHarmProvider(battery, batteryStore)
+			if provider then
 				battery.HarmDefenseState = HDS.PD_PROTECTED
 				_logger:debug(
 					string.format(

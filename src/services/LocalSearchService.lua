@@ -142,7 +142,7 @@ function Medusa.Services.LocalSearchService:_scan(battery, now)
 		Medusa.Services.MetricsService.inc(self.metrics.scansTotal)
 	end
 	if self.metrics and self.metrics.scanDuration then
-		Medusa.Services.MetricsService.observe(self.metrics.scanDuration, Medusa.hpTimer() - startedAt)
+		Medusa.Services.MetricsService.observeDuration(self.metrics.scanDuration, Medusa.hpTimer() - startedAt)
 	end
 	return true
 end

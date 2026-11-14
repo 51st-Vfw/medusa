@@ -32,7 +32,7 @@ DEBRIEF|t=812.4|clock=10:13:32|net=NORTH|ev=REPORT_DELIVERED|from=iads.north.obs
 ## Events
 
 Common fields: `track` is the track's display id (the id the tactical display and logs show); positions `x`, `z` are
-DCS map coordinates in metres; `load` is the [net load](crews-and-readiness.md#net-load) from 0 to 1.
+DCS map coordinates in meters; `load` is the [net load](crews-and-readiness.md#net-load) from 0 to 1.
 
 ### Tracks
 
@@ -46,7 +46,7 @@ DCS map coordinates in metres; `load` is the [net load](crews-and-readiness.md#n
 | Event | When | Fields |
 |---|---|---|
 | `ARM_CONFIRMED` | A track is confirmed as an anti-radiation missile ([HARM detection](harm-detection.md)) | `track`; `llr` the score; `scans` looks used |
-| `ARM_BLOCKED` | An ARM-like track was not confirmed (once per track and reason) | `track`; `why`: `unpowered` (a store dropped by an aircraft, no motor: [Released stores](released-stores.md)), `window` (it appeared beside an aircraft and is being watched for a motor) or `size` (its return is aircraft-sized); `llr`; `scans` |
+| `ARM_BLOCKED` | An ARM-like track was not confirmed (once per track and reason) | `track`; `why`: `unpowered` (a store dropped by an aircraft, no motor: [Released stores](released-stores.md)), `window` (it appeared beside an aircraft and is being watched for a motor), `ballistic` (a store seen too late to link that falls like a bomb and will land clear of every air-defense battery: [Released stores](released-stores.md#a-store-seen-too-late-to-link)) or `size` (its return is aircraft-sized); `llr`; `scans` |
 | `DECOY_PROBABLE` | A track becomes a probable decoy ([Decoys](decoys.md)) | `track`; `from` its label before (`AIRCRAFT` or `SUSPECT`); `reason`: `sustained straight energy loss`, `unanswered launches` or `seen as a munition` |
 | `DECOY_FIRE_HOLD` | A battery turns engage-air-weapons off against a probable decoy | `battery`; `track` the decoy; `trigger` `lock` (its fire-control radar locked the decoy) or `shot` (it fired at it); `sec` the hold's length (20); `n` which hold against this decoy (1-3); `waited` seconds the hold waited for a missile in flight, when 1 s or more |
 
@@ -56,25 +56,17 @@ DCS map coordinates in metres; `load` is the [net load](crews-and-readiness.md#n
 |---|---|---|
 | `CREW_ROSTER` | Once per network at start | `observers` number of observer posts; `observer_skills` their skills; `crews` number of other crews; `crew_skills` their skills; `defaulted` units that took the default skill; `default_skill` |
 | `REPORT_NOT_MADE` | A crew saw or heard an aircraft but did not get a report out ([crew factors](crews-and-readiness.md)) | `from` the crew's group; `skill` its mission skill; `skill_as` the skill it reports as (observer posts); `readiness`; `saw` what (`hostile_jet`, `unidentified_helicopter`, ...); `heard` `true` when only heard; `load` |
-| `REPORT_LOST` | A report never arrived | `from`; `why` `not_heard` (lost on the net) or `net_saturated` (too many reports waiting); `after_s` seconds after it was sent; `saw`; `load` |
+| `REPORT_LOST` | A report never arrived | `from`; `why` `not_heard` (lost on the net) or `net_saturated` (too many reports waiting); `load`. With `not_heard` only, also `after_s` (seconds after it was sent) and `saw` |
 | `REPORT_DELIVERED` | A report arrived | `from`; `after_s`; `saw`; `x`, `z` the reported position; `err_m` its error; `caused`: `wake_sam`, `cue_crews`, `cue_radar` joined by `+`, or `nothing`; `woke` the SAM groups woken; `crews_cued`; `radars_cued`; `load` |
-| `READINESS` | The network's readiness changes ([Readiness](crews-and-readiness.md#readiness)) | `from`; `to`; `why`: `hostile_track`, `hostile_report`, `radar_fix`, `radar_heard` (word spreads), `first_launch`, `first_loss`, or `api` (`Medusa.API.setReadiness`) |
+| `READINESS` | The network's readiness changes ([Readiness](crews-and-readiness.md#readiness)) | `from`; `to`; `why`: `hostile_track`, `hostile_report` (word spreads), `first_launch`, `first_loss`, or `api` (`Medusa.API.setReadiness`) |
 
 ### Batteries, radars and losses
 
 | Event | When | Fields |
 |---|---|---|
-| `WAKE` | A battery is brought up WARM or HOT for a reason (start-up states, EMCON cycles and rearming write none) | `battery`; `from` its state before (`COLD`, `WARM`, ...); `to` `WARM` or `HOT`; `reason`: `assigned` (given a target), `emcon_self_assign`, `observer_report`, `esm_fix`, `own_crew_saw` / `own_crew_heard` (local initiative), `manpad_engages` (a MANPAD team fires), `point_defence_vs_arm` / `point_defence` (defending a site), `self_defence_vs_arm` (an ARM inbound on the battery itself), or `local_radar: <reason>`; `track` the track it came up for, when there is one |
+| `WAKE` | A battery is brought up WARM or HOT for a reason (start-up states, EMCON cycles and rearming write none) | `battery`; `from` its state before (`COLD`, `WARM`, ...); `to` `WARM` or `HOT`; `reason`: `assigned` (given a target), `emcon_self_assign`, `observer_report`, `own_crew_saw` / `own_crew_heard` (local initiative), `manpad_engages` (a MANPAD team fires), `point_defence_vs_arm` / `point_defence` (defending a site), `self_defence_vs_arm` (an ARM inbound on the battery itself), or `local_radar: <reason>`; `track` the track it came up for, when there is one |
 | `LOCAL_RADAR_UP` | A [local cueing radar](local-radars-and-observers.md#local-cueing-radars) comes up | `radar` its group; `reason`: `threat near`, `supported units alerted`, `observer report`, `local initiative` or `periodic sweep` |
 | `SITE_LOST` | A site of the network is lost (once per group) | `site` its group; `kind` `sensor` (an early-warning radar or other sensor group) or the battery's role (`VLR_SAM`, `LR_SAM`, `MR_SAM`, `SR_SAM`, `GENERIC_SAM`, `AAA`, `MANPAD`) |
-
-### Listening stations
-
-| Event | When | Fields |
-|---|---|---|
-| `ESM_INTERCEPT` | A station takes a bearing ([ESM](esm-listening-stations.md)); at most once per station, radar class and 30-degree sector every 5 minutes | `station`; `brg` bearing in degrees; `sigma_deg` its error; `class` `AEW` (early-warning radar, an AWACS), `FCR` (fire-control radar) or `OTHER` (other airborne radar) |
-| `ESM_FIX` | Bearings are matched into a fix | `class`; `x`, `z`; `err_km`; `how` `<n>_station`, `2_station_repeat` or `2_station_single`; `stations` the stations used; `look_t` when the look was made; `caused` as for `REPORT_DELIVERED`, or `evidence_only` (too coarse to cue, or two bearings seen once); `woke` |
-| `ESM_AMBIGUOUS` | Bearings of a class could not be matched up (at most once a minute per class) | `class`; `bearings`; `crossings` possible crossings; `fixes` fixes made in that look |
 
 ### Run
 

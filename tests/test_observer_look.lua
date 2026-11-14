@@ -279,7 +279,7 @@ function TestObserverLook:test_friend_or_foe_is_told_only_by_sight_close_by()
 	lu.assertTrue(observe(look(), out))
 	lu.assertEquals(out.Identity, "unidentified")
 
-	-- An own aircraft seen close by is recognised and not reported...
+	-- An own aircraft seen close by is recognized and not reported...
 	world_units[1] = aircraft(8, 1500, 300, 0, { coalition = RED })
 	lu.assertFalse(observe(look(), {}))
 	-- ...one only heard (behind a hill) or seen far off could be anyone's.

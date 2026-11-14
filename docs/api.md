@@ -53,7 +53,7 @@ Medusa.API.setReadiness("NORTH", "ALERTED")
 -- Read it, for example to drive a message
 local readiness = Medusa.API.getReadiness("NORTH")
 if readiness == "SURPRISED" then
-	trigger.action.outText("The northern air defences have not noticed you yet.", 10)
+	trigger.action.outText("The northern air defenses have not noticed you yet.", 10)
 end
 ```
 
@@ -65,10 +65,10 @@ Scripts can read which Medusa is running:
 
 | Field | Value in this release | Meaning |
 |---|---|---|
-| `Medusa.version` | `"BKEv0.0.1"` | The BKE version, with a `BKE` prefix so it is never mistaken for a stock Medusa version (a local development build reads `"BKEv0.0.1-dev-<branch>"`). In stock Medusa this field holds the Medusa version |
+| `Medusa.version` | `"BKEv0.1.0"` | The BKE version, with a `BKE` prefix so it is never mistaken for a stock Medusa version (a local development build reads `"BKEv0.1.0-dev-<branch>"`). In stock Medusa this field holds the Medusa version |
 | `Medusa.baseVersion` | `"1.6.0"` | The Medusa release this edition is based on. A script that compares `Medusa.version` with a stock Medusa version number should read this instead |
 | `Medusa.edition` | `"Black Knight Edition (BKE)"` | The edition. Not set in stock Medusa |
-| `Medusa.displayName` | `"Medusa IADS - Black Knight Edition (BKE) v0.0.1 (based on Medusa v1.6.0)"` | The name written to dcs.log at start |
+| `Medusa.displayName` | `"Medusa IADS - Black Knight Edition (BKE) v0.1.0 (based on Medusa v1.6.0)"` | The name written to dcs.log at start |
 
 ```lua
 if Medusa and Medusa.edition then

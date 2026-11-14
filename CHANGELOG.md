@@ -11,6 +11,103 @@ under [Medusa (upstream) history] are Medusa's own, as Medusa published them.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-13
+
+Based on Medusa 1.6.0. A beta, published as a GitHub pre-release. Three changes a mission maker may notice first:
+ESM listening stations are gone, because DCS gives scripts no radar state for player-flown aircraft (see Removed); a
+network whose only radar is a lone, unnamed Dog Ear now uses its long- and medium-range SAMs as early-warning radars
+until the Dog Ear comes up (see Changed); and a misspelled doctrine field is now reported in dcs.log instead of silently
+taking its default (see Added).
+
+### Added
+
+- A misspelled top-level doctrine field is reported: dcs.log gets an error naming each key the doctrine does not know
+  (and the field it resembles when only the case differs), where before the field silently took its default. A number
+  field given something that is not a number is an error too; it still takes its default. The flat MANPAD fields
+  older missions use are accepted without an error. See the Validation note in docs/doctrine-fields.md.
+- Doctrine `CrewFactorsDefaultSkill` sets the reporting skill of crews the mission file gives no skill (spawned
+  during the mission, or set to Random or Player skill) apart from their crew-suppression resistance. Left out, it
+  follows `CrewSuppression.DefaultCrewSkill` (Average by default) as before, so existing missions do not change.
+- `MEDUSA_CONFIG.PointDefense` ties a point-defense group to the SAM it protects by their group names, over the
+  automatic nearest-first choice, and a SAM may now have several point-defense providers, each going HOT for a HARM
+  aimed at it. Missions without ties are assigned as before. See Point defense in docs/configuration.md.
+
+### Changed
+
+- `SAMAsEWR = "WHEN_NO_EWR"` (the default) no longer counts a local cueing radar (a lone, unnamed Dog Ear) as an
+  early-warning radar. A network whose only radar is such a Dog Ear now uses its long- and medium-range SAMs as
+  early-warning radars, as stock Medusa does with no early-warning radar, instead of staying blind until the Dog Ear
+  comes up. A Dog Ear named with the `ewr` token is still an always-on early-warning radar and the SAMs stay SAMs.
+- Track re-acquisition: a confirmed ARM track (with no aircraft evidence) that has missed two of its radar looks in a
+  row (twice the time between its last two looks, at least 4 s) can now be continued by a new contact while it is still
+  held, instead of only after `TrackMemorySec` (30 s by default), once the slowest radar still covering it has missed
+  two of its own looks too. The DCS object it holds still resumes it until the memory runs out, so its label carries
+  over across gaps of up to 20 s with the default track memory when only SAM radars covered it. Looks come at the
+  fastest covering radar's rate, so an ARM whose SAM radar shuts down while an early-warning radar still detects it (or
+  detects it again before the second ARM is first reported) keeps its track and label, and a second ARM of the salvo
+  first seen beside it does not take them; a radar that has lost the ARM covers it only until it has missed two looks.
+  Past 20 s a held ARM is no longer offered to new contacts (one would take its track without the label), so an ARM an
+  early-warning radar covered waits for its own object. Other tracks still wait for the memory to run out: a jet held by
+  a SAM radar that shuts down while a slower early-warning radar still covers it is not given to a store it releases. In
+  replays of recorded flights with one SAM radar per contact and every contact back as another object after 5, 10 and 20
+  s, 93%, 90% and 85% of confirmed ARMs came back confirmed (none before) and no jet took an ARM's label. A confirmed
+  ARM lost to new contacts this way gives no launch cue (its last position is stale). See docs/track-reacquisition.md
+- Medusa's own timings no longer read 0 inside DCS. DCS removes the wall clock from mission scripts, so Medusa times
+  itself with model time, which does not move within a frame. The log now says at start which timer is in use; with
+  model time the `medusa_*_duration_seconds` metrics record nothing. A server that restores `os` gets real figures.
+- Less garbage for the mission's Lua collector: the sensor poll list (rebuilt every tick) reuses its scratch lists, and
+  the periodic group scan reads each group's id from the group itself and parses a group outside the network only
+  once; the battery radius search (every HARM, assignment and point-defense check) walks the grid into a reused list
+  instead of building a set per call. Measured in DCS on a 534-unit network with 190 batteries, Medusa made about
+  60 KB of garbage per 0.1 s tick and its slowest ticks (10-15 ms) fell on collector cycles; these changes cut about
+  9.5 KB per tick, a group scan from 87 KB to 37 KB, and about 12 KB per radius search (37 KB per target-assignment
+  pass). Behavior is unchanged.
+- GitHub Releases of 0.x versions are published as pre-releases: BKE is a beta until 1.0.0.
+
+### Removed
+
+- ESM listening stations. DCS gives mission scripts no radar state for player-flown aircraft, so a station could
+  hear AI aircraft only, never a player's jet. What a mission made for 0.0.1 gets now:
+  - a group named with the `esm` or `elint` token (or `Roles.ESM`) is an untrained lookout post: its crew looks and
+    reports like any ground crew, without an observer post's training (with `obs` too, it is an observer post);
+    dcs.log gets an error line naming the group;
+  - doctrine `PassiveDetection` and the `ESM` table are ignored, with one error line in dcs.log;
+  - the debrief events `ESM_INTERCEPT`, `ESM_FIX` and `ESM_AMBIGUOUS`, the `esm_fix` wake reason, the `READINESS`
+    reasons `radar_fix` and `radar_heard`, and the `listening stations:` log line are gone: readiness no longer rises
+    on a listening-station fix.
+
+### Fixed
+
+- A bomb first seen too late to tie to the aircraft that dropped it is no longer confirmed as an ARM while it falls like
+  a bomb (no lift, no motor), will land at least 3 km from every air-defense battery (shut down or not), and an
+  aircraft within 40 km had the energy to have carried it. It can still be a suspected or probable ARM; the debrief
+  says `ARM_BLOCKED` with `why=ballistic`. In replays of recorded flights, FAB-250s seen 20 s late were no longer
+  confirmed (40 and 8 before, at 2 and 5 s looks) and no ARM (284 flights) was confirmed later or missed. Guided bombs
+  seen late still can be. See docs/released-stores.md
+- AAA barrages no longer log `Weapon.GetDesc` "Weapon doesn't exist" errors. A network-run AAA battery's gun shells
+  are no longer followed as missiles by the decoy response (a missile's guidance is read when its shot event arrives),
+  and the crew-suppression weapon tracker drops a weapon that ended before its first sample without reading it.
+- The crew-suppression weapon tracker no longer admits gun shells: they never caused suppression, but a barrage could
+  fill its slots and turn away a bomb or missile shot at the same time.
+- Gun fire from a network-run AAA battery no longer counts in the network's rolling kill rate. Each shell counted as a
+  missed missile shot, so a barrage raised the Pk floor the SAMs need before they are given a target (up to its
+  ceiling); a kill by an AAA battery no longer counts as a hit either. A fired shell no longer keeps the battery hot as
+  a missile in flight, nor spends a last-chance salvo: a gun's last chance after a handoff runs on its hold-down window.
+- Guns in a SAM battery (a Shilka grouped into an SA-6 site, the cannon of a Tunguska or a Pantsir) no longer count in
+  the rolling kill rate. Their kill turned the network's last missed missile shot into a hit, which lowered the Pk floor;
+  a kill whose weapon DCS names as one of the battery's gun shells is no longer a hit (any other kill still is). A
+  gun-missile unit's shell no longer spends one of its missiles, logs an `ammo type ... not found` error, counts as a
+  missile launch for the crews, or holds off the decoy response's weapon-release writes as a launch does.
+- `task bump` (`scripts/build/bump_version.py`) no longer rewrites Medusa's changelog links to point at this fork or
+  mangles non-ASCII text on Windows. It updates `uv.lock` with the pinned uv and the version named in the README and
+  docs, and writes nothing unless every step succeeds.
+- The release workflow stops when CHANGELOG.md has no section (or an empty one) for the tag, instead of publishing the
+  release with a placeholder line as its notes.
+- A destroyed point-defense group no longer leaves the SAM it protected marked as defended: the SAM gets the next
+  free provider in reach. Before, it stayed without point defense for the rest of the mission.
+- Very-long-range SAM batteries (weapon reach over 250 km) now take point defense like long- and medium-range
+  ones. Before, no SHORAD was ever assigned to them, so gun point defense beside one never defended it.
+
 ## [0.0.1] - 2026-11-11
 
 Based on Medusa 1.6.0. The first Black Knight Edition release. Medusa missions load in BKE as
@@ -321,7 +418,8 @@ Medusa's own releases, up to the one this edition is based on.
 ### Added
 	- Initial Release
 
-[Unreleased]: https://github.com/51st-Vfw/medusa/compare/BKEv0.0.1...HEAD
+[Unreleased]: https://github.com/51st-Vfw/medusa/compare/BKEv0.1.0...HEAD
+[0.1.0]: https://github.com/51st-Vfw/medusa/compare/BKEv0.0.1...BKEv0.1.0
 [0.0.1]: https://github.com/51st-Vfw/medusa/releases/tag/BKEv0.0.1
 [Medusa (upstream) history]: https://github.com/medusa-iads/medusa/blob/main/CHANGELOG.md
 [1.6.0]: https://github.com/medusa-iads/medusa/compare/v1.5.0...v1.6.0

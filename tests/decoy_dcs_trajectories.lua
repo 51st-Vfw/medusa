@@ -1,8 +1,8 @@
 -- Flights recorded in DCS World 2.9.31 (dedicated server, Caucasus, AI only) for the decoy assessment:
 -- ADM-141A TALDs, AGM-154 JSOWs, AGM-84H SLAM-ERs, anti-radiation missiles and jets, each sampled every 5 s (a SAM
 -- search radar's refresh) from first sight. Rows are { t, x, y, z, vx, vy, vz }: seconds since first sight, DCS world
--- metres (y = altitude MSL) and m/s. The first jet glides without power for over 60 s late in its flight, after
--- manoeuvring; the others are SEAD and strike jets in their normal flight.
+-- meters (y = altitude MSL) and m/s. The first jet glides without power for over 60 s late in its flight, after
+-- maneuvering; the others are SEAD and strike jets in their normal flight.
 return {
 	tald = {
 		{

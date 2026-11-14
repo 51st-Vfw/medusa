@@ -14,7 +14,7 @@ Four doctrine switches, all on by default:
 | `DecoyFireDiscipline` | Turns that option off for 20 s when the battery's own radar locks a decoy or it fires at one. Needs `ManageEngageAirWeapons`: with that off it does nothing, and dcs.log says so |
 | `DecoyTestShots` | Fires one missile at a lone suspected-decoy group and watches what it does |
 
-The responses apply to very-long-, long- and medium-range SAM batteries. Short-range SAMs, SHORAD and point defence
+The responses apply to very-long-, long- and medium-range SAM batteries. Short-range SAMs, SHORAD and point defense
 keep engaging as in Medusa 1.6.0.
 
 ## Decoy assessment
@@ -27,7 +27,7 @@ a glide steeper than 1 in 14 at the contact's speed (and at least 5 m/s of energ
 | Label | When | Effect |
 |---|---|---|
 | Suspected decoy | 60 s of such a glide | Counts half as much when targets are ranked |
-| Probable decoy | 90 s of it, or sooner with the evidence below | Long- and medium-range SAMs no longer engage it or wake for it. Point defence still engages one whose glide is predicted to end at the site it protects. [Alert zones](alert-zones.md) count it as a munition, not an aircraft |
+| Probable decoy | 90 s of it, or sooner with the evidence below | Long- and medium-range SAMs no longer engage it or wake for it. Point defense still engages one whose glide is predicted to end at the site it protects. [Alert zones](alert-zones.md) count it as a munition, not an aircraft |
 
 Evidence that brings the probable label sooner:
 
@@ -39,12 +39,12 @@ Evidence that brings the probable label sooner:
 The label clears **for good** on what no unpowered decoy can do: two looks in a row of an energy gain (thrust), a
 sustained climb or a hard turn (over 3 degrees per second; decoys never turned more than about 1 degree per second in
 the recorded flights, jets reach 10-20); 40 s of holding its energy; or still flying when any glide from where it was
-labelled would be over. So a jet cannot fake it.
+labeled would be over. So a jet cannot fake it.
 
 Radar refresh jitter (5.1 s or 10.3 s looks instead of 5 and 10) does not stop the assessment.
 
 In test scenarios (replays of recorded DCS flights), 85% of TALDs became probable decoys, about 110 s after first sight,
-and none of 95 jet flights, 12 JSOWs, 8 SLAM-ERs or 128 ARMs was labelled.
+and none of 95 jet flights, 12 JSOWs, 8 SLAM-ERs or 128 ARMs was labeled.
 
 ## Engage-air-weapons
 
@@ -80,8 +80,8 @@ the decoys too. Fire discipline handles that case:
   that may be a weapon, or has just launched. A salvo at a decoy counts once.
 - A hold ends early once its decoy is no longer one. None during a test shot. At most **80 s of holds in any 2
   minutes** per battery.
-- Anti-radiation missiles do not stop a hold: the HARM shutdown response and point defence deal with them.
-- **Self-defence comes first.** A decoy whose glide is predicted to end within **3 km** of the battery (diving at it or
+- Anti-radiation missiles do not stop a hold: the HARM shutdown response and point defense deal with them.
+- **Self-defense comes first.** A decoy whose glide is predicted to end within **3 km** of the battery (diving at it or
   gliding down onto it) is never held against, and keeps the option on: the battery defends itself as against a glide
   weapon. The predicted end is along its ground track, at the shorter of its energy glide and its present descent
   carried to the ground. A decoy that flies over the battery towards something behind it is held against.

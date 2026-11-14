@@ -75,6 +75,33 @@ local function validateConfigField(s, raw, logger)
 	end
 end
 
+--- [BKE] MEDUSA_CONFIG.PointDefense: { ["<PD group name>"] = "<protected group name>" }. Keeps the name pairs and
+--- reports anything else in dcs.log.
+local function validatePointDefenseTies(raw, logger)
+	local ties = {}
+	if raw == nil then
+		return ties
+	end
+	if type(raw) ~= "table" then
+		logger:error("invalid config 'PointDefense' (a table of PD group name = protected group name); no ties used")
+		return ties
+	end
+	for pdName, targetName in pairs(raw) do
+		if type(pdName) == "string" and pdName ~= "" and type(targetName) == "string" and targetName ~= "" then
+			ties[pdName] = targetName
+		else
+			logger:error(
+				string.format(
+					"invalid config 'PointDefense' entry [%s] = %s ignored (both must be group names)",
+					tostring(pdName),
+					tostring(targetName)
+				)
+			)
+		end
+	end
+	return ties
+end
+
 function Medusa.Config:initialize()
 	if self.Current then
 		return self.Current
@@ -111,6 +138,7 @@ function Medusa.Config:initialize()
 		local s = CONFIG_SCHEMA[i]
 		runningConfig[s.name] = validateConfigField(s, overrides[s.name], self._logger)
 	end
+	runningConfig.PointDefense = validatePointDefenseTies(overrides.PointDefense, self._logger)
 
 	self.Current = runningConfig
 	return self.Current
@@ -175,6 +203,12 @@ function Medusa.Config:getNetworks()
 		end
 	end
 	return out
+end
+
+--- [BKE] The mission maker's point-defense ties, PD group name -> protected group name (empty when none).
+function Medusa.Config:getPointDefenseTies()
+	local cfg = self:get()
+	return (cfg and cfg.PointDefense) or {}
 end
 
 function Medusa.Config:getLogLevel()

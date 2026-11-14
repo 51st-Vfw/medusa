@@ -658,7 +658,7 @@ function TestDecoyFireDiscipline:test_a_salvo_at_a_decoy_under_a_hold_counts_onc
 end
 
 function TestDecoyFireDiscipline:test_an_anti_radiation_missile_in_its_last_run_neither_blocks_nor_ends_a_hold()
-	-- HARMs are left to the HARM shutdown response and point defence: measured in DCS, stopping holds in an ARM's last
+	-- HARMs are left to the HARM shutdown response and point defense: measured in DCS, stopping holds in an ARM's last
 	-- 30 s let an SA-10 fire 10 missiles at decoys in that time and none at the ARMs.
 	local w, b, decoy = harmAndDecoy()
 	local arm = addTrack(w, "unknown", {
@@ -1458,7 +1458,7 @@ function TestDecoyFlights:test_a_crew_guided_flight_ending_judges_its_target()
 	lu.assertEquals(#b.MissilesInFlight, 0)
 end
 
--- == Effects on assignment, point defence ==
+-- == Effects on assignment, point defense ==
 
 TestDecoyEffects = {}
 
@@ -1519,7 +1519,7 @@ function TestDecoyEffects:test_long_range_battery_engaging_a_track_that_turns_pr
 	lu.assertStrContains(result.reason, "probable decoy")
 end
 
---- A battery protected by a point-defence battery, both cold, the provider forced viable; returns protected, pd.
+--- A battery protected by a point-defense battery, both cold, the provider forced viable; returns protected, pd.
 local function pdPair(w)
 	local protected = addBattery(w, { ActivationState = "STATE_COLD" })
 	local pd = addBattery(w, { Role = "SR_SAM", ActivationState = "STATE_COLD", EngagementRangeMax = 25000 })

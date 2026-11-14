@@ -174,7 +174,7 @@ TestTrackManagerPruneStale = {}
 
 function TestTrackManagerPruneStale:setUp()
 	setupMocks()
-	-- The re-association tests here pin the stock behaviour (doctrine EvidenceReacquisition off: the same DCS object
+	-- The re-association tests here pin the stock behavior (doctrine EvidenceReacquisition off: the same DCS object
 	-- near its old position). Evidence-based re-acquisition is tested in test_track_reacquisition.lua.
 	self.mgr = Medusa.Services.TrackManager:new({ evidenceReacquisition = false })
 end
